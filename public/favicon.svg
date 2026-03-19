@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <style>
+    .heart { animation: fadeHeart 3s ease-in-out infinite; }
+    .sparkle { animation: fadeSparkle 3s ease-in-out infinite; }
+    @keyframes fadeHeart { 0%,45%{opacity:1} 50%,95%{opacity:0} 100%{opacity:1} }
+    @keyframes fadeSparkle { 0%,45%{opacity:0} 50%,95%{opacity:1} 100%{opacity:0} }
+  </style>
+  <g class="heart">
+    <path fill="#ec4899" d="M16 28.2s-1.2-.7-2.8-1.8C8.6 23.2 3 18.5 3 12.5 3 8.9 5.9 6 9.5 6c2.2 0 4.3 1.1 5.5 2.8L16 10l1-1.2C18.2 7.1 20.3 6 22.5 6 26.1 6 29 8.9 29 12.5c0 6-5.6 10.7-10.2 13.9-1.6 1.1-2.8 1.8-2.8 1.8z"/>
+  </g>
+  <g class="sparkle">
+    <path fill="#a855f7" d="M16 3l2.1 7.4a3 3 0 002 2L27.5 14.5l-7.4 2.1a3 3 0 00-2 2L16 26l-2.1-7.4a3 3 0 00-2-2L4.5 14.5l7.4-2.1a3 3 0 002-2z"/>
+    <circle cx="25" cy="5" r="1.5" fill="#ec4899"/>
+    <circle cx="6" cy="25" r="1.5" fill="#ec4899"/>
+  </g>
+</svg>

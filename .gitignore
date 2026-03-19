@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+secret/node_modules/
+
+# Next.js
+.next/
+secret/.next/
+out/
+secret/out/
+
+# Build
+dist/
+secret/dist/
+
+# Env files
+.env
+.env.local
+.env.*.local
+secret/.env
+secret/.env.local
+secret/.env.*.local
+
+# Database
+*.db
+*.db-journal
+prisma/*.db
+secret/prisma/*.db
+
+# Misc
+*.tar.gz
+*.log
+.DS_Store
+girlypopchat-preview.html.txt
