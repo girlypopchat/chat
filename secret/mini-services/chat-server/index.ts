@@ -4,7 +4,7 @@
 import { Server as HttpServer } from 'http'
 import { Server as SocketIOServer, Socket } from 'socket.io'
 import { db } from '../../src/lib/db'
-import { generateViewerToken, generateBroadcasterToken, generateTwoWayToken, addViewRequest, getViewRequests, removeViewRequest, clearViewRequests } from '../../src/lib/livekit'
+import { generateBroadcastRoomName, addViewRequest, getViewRequests, removeViewRequest, clearViewRequests } from '../../src/lib/jitsi'
 import { canDm, getOrCreateConversation, getOtherUserId } from '../../src/lib/dm'
 
 // ============================================
@@ -34,7 +34,7 @@ const connectedUsers = new Map<string, UserSocket>()
 const roomUsers = new Map<string, Set<string>>()
 const broadcasters = new Map<string, {
   roomName: string
-  livekitRoom: string
+  jitsiRoom: string
   viewerCount: number
   isLocked: boolean
 }>()
@@ -386,30 +386,26 @@ class GirlyPopChatServer {
       return callback({ success: false, message: 'Already broadcasting' })
     }
 
-    const roomName = `broadcast-${socket.userId}-${Date.now()}`
-    const token = await generateBroadcasterToken(roomName, socket.userId!, socket.user!.username)
+    const roomName = generateBroadcastRoomName(socket.user!.username)
 
-    // Create broadcast record
     const broadcast = await db.broadcast.create({
       data: {
         userId: socket.userId!,
         roomId: socket.currentRoom,
-        livekitRoom: roomName,
+        jitsiRoom: roomName,
         isLocked: data.locked || false,
       },
     })
 
-    // Track in memory
     broadcasters.set(socket.userId!, {
       roomName,
-      livekitRoom: roomName,
+      jitsiRoom: roomName,
       viewerCount: 0,
       isLocked: data.locked || false,
     })
 
     socket.isBroadcasting = true
 
-    // Notify ALL users (not just those in same room)
     this.io.emit('broadcastStarted', {
       broadcasterId: socket.userId,
       username: socket.user?.username,
@@ -420,9 +416,7 @@ class GirlyPopChatServer {
 
     callback({
       success: true,
-      token,
       roomName,
-      livekitUrl: process.env.LIVEKIT_URL,
     })
   }
 
@@ -459,15 +453,12 @@ class GirlyPopChatServer {
       return callback({ success: false, message: 'Broadcast not found' })
     }
 
-    const token = await generateTwoWayToken(broadcast.livekitRoom, socket.userId!, socket.user!.username)
     broadcast.viewerCount++
     
     return callback({
       success: true,
       approved: true,
-      token,
       roomName: broadcast.roomName,
-      livekitUrl: process.env.LIVEKIT_URL,
     })
   }
 
@@ -489,17 +480,13 @@ class GirlyPopChatServer {
     }
 
     if (data.approved) {
-      const token = await generateTwoWayToken(broadcast.livekitRoom, data.viewerId, viewerSocket.user!.username)
       broadcast.viewerCount++
 
       viewerSocket.emit('viewResponse', {
         approved: true,
-        token,
         roomName: broadcast.roomName,
-        livekitUrl: process.env.LIVEKIT_URL,
       })
 
-      // Notify broadcaster of new viewer
       socket.emit('viewerJoined', {
         viewerId: data.viewerId,
         viewerName: viewerSocket.user?.username,

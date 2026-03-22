@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { io, Socket } from 'socket.io-client'
-import { Room as LiveKitRoom, Track } from 'livekit-client'
 import UserProfileCard from '@/components/user-profile-card'
 import DmPanel from '@/components/dm-panel'
+import JitsiVideo from '@/components/jitsi-video'
 import { ROOM_TYPES, ACCESS_MODES, VIBE_PRESETS } from '@/lib/room-config'
 import { 
   MoreVertical, Edit2, Trash2, Smile, Image, X, Check, 
@@ -122,6 +122,7 @@ export default function ChatPage() {
   const [connected, setConnected] = useState(false)
   const [user, setUser] = useState<any>(null)
   const [isBroadcasting, setIsBroadcasting] = useState(false)
+  const [broadcastRoomName, setBroadcastRoomName] = useState<string | null>(null)
   const [isLocked, setIsLocked] = useState(false)
   const [viewerCount, setViewerCount] = useState(0)
   const [viewRequests, setViewRequests] = useState<ViewRequest[]>([])
@@ -135,11 +136,7 @@ export default function ChatPage() {
     viewToken?: string
     isViewing?: boolean
   }[]>([])
-  const [livekitTokens, setLivekitTokens] = useState<Record<string, string>>({})
   const [viewingBroadcasts, setViewingBroadcasts] = useState<Array<{ broadcasterId: string; username: string; roomName: string }>>([])
-  const [viewingVideoEls, setViewingVideoEls] = useState<Record<string, HTMLVideoElement>>({})
-  const [localViewerStream, setLocalViewerStream] = useState<MediaStream | null>(null)
-  const viewingVideoRefs = useRef<Record<string, HTMLVideoElement>>({})
   
   // New feature states
   const [editing, setEditing] = useState<EditingState | null>(null)
@@ -171,15 +168,9 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
-  const livekitRoomsRef = useRef<Record<string, LiveKitRoom>>({})
   const broadcasterVideoRefs = useRef<Record<string, HTMLVideoElement>>({})
-  const broadcasterRoomNamesRef = useRef<Record<string, string>>({}) // broadcasterId -> roomName
-  const pendingTracksRef = useRef<Record<string, Array<{ track: any; roomName: string }>>>({})
+  const broadcasterRoomNamesRef = useRef<Record<string, string>>({})
   const currentUserIdRef = useRef<string | null>(null)
-  const viewerStreamRef = useRef<MediaStream | null>(null)
-  const viewerVideoRef = useRef<HTMLVideoElement | null>(null)
 
   // ============================================
   // Effects
@@ -247,12 +238,6 @@ export default function ChatPage() {
       console.error('Failed to fetch proposals:', error)
     }
   }
-
-  useEffect(() => {
-    if (isBroadcasting && videoRef.current && streamRef.current) {
-      videoRef.current.srcObject = streamRef.current
-    }
-  }, [isBroadcasting])
 
   useEffect(() => {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight)
@@ -390,10 +375,9 @@ export default function ChatPage() {
         
         if (roomName && broadcasterId !== currentUserIdRef.current && socketRef.current) {
           console.log('Auto-requesting view for broadcaster:', broadcasterId, 'roomName:', roomName, 'myId:', currentUserIdRef.current)
-          socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
+          socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; roomName?: string; message?: string }) => {
             console.log('viewRequest response:', res)
-            if (res.success && res.approved && res.token && res.roomName) {
-              setLivekitTokens(prev => ({ ...prev, [res.roomName!]: res.token! }))
+            if (res.success && res.approved && res.roomName) {
               setViewingBroadcasts(prev => {
                 if (prev.find(b => b.broadcasterId === broadcasterId)) return prev
                 return [...prev, { broadcasterId, username: username || '', roomName: res.roomName! }]
@@ -406,13 +390,6 @@ export default function ChatPage() {
       socket.on('broadcastStopped', ({ broadcasterId }: { broadcasterId: string }) => {
         setActiveBroadcasters(prev => prev.filter(b => b.broadcasterId !== broadcasterId))
         setViewingBroadcasts(prev => prev.filter(b => b.broadcasterId !== broadcasterId))
-        setLivekitTokens(prev => {
-          const next = { ...prev }
-          Object.keys(next).forEach(key => {
-            if (key.includes(broadcasterId)) delete next[key]
-          })
-          return next
-        })
       })
 
       socket.on('viewRequest', (request: ViewRequest) => {
@@ -423,10 +400,8 @@ export default function ChatPage() {
         setViewerCount(viewerCount)
       })
 
-      socket.on('viewResponse', ({ approved, token, roomName, livekitUrl, message }: { approved: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
-        if (approved && token && roomName) {
-          setLivekitTokens(prev => ({ ...prev, [roomName]: token }))
-        } else if (message) {
+      socket.on('viewResponse', ({ approved, roomName, message }: { approved: boolean; roomName?: string; message?: string }) => {
+        if (!approved && message) {
           console.log('View request denied:', message)
         }
       })
@@ -656,80 +631,23 @@ export default function ChatPage() {
       return
     }
 
-    console.log('Socket connected:', socketRef.current.connected)
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-      }
-      console.log('Got media stream, tracks:', stream.getTracks().length)
-    } catch (err) {
-      console.error('getUserMedia failed:', err)
-      alert('Camera access denied. Please allow camera permissions.')
-      return
-    }
-
     console.log('Emitting startBroadcast...')
     socketRef.current.emit('startBroadcast', { source: 'camera', locked: isLocked }, 
-      async (res: { success: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
+      (res: { success: boolean; roomName?: string; message?: string }) => {
         console.log('startBroadcast callback:', res)
-        if (res.success && res.token && res.roomName && res.livekitUrl) {
+        if (res.success && res.roomName) {
           setIsBroadcasting(true)
-          
-          // Connect broadcaster to their own LiveKit room
-          const room = new LiveKitRoom()
-          livekitRoomsRef.current[res.roomName] = room
-          
-          try {
-            console.log('Connecting to LiveKit:', res.livekitUrl, 'room:', res.roomName, 'token:', res.token ? 'present' : 'MISSING')
-            try {
-              await room.connect(res.livekitUrl, res.token)
-            } catch (connectErr) {
-              console.error('LiveKit connect error:', connectErr)
-              throw connectErr
-            }
-            console.log('Connected to own broadcast room:', res.roomName)
-            
-            // Publish local tracks
-            if (streamRef.current) {
-              const videoTrack = streamRef.current.getVideoTracks()[0]
-              const audioTrack = streamRef.current.getAudioTracks()[0]
-              console.log('Publishing tracks - video:', !!videoTrack, 'audio:', !!audioTrack)
-              console.log('Video track info:', videoTrack?.kind, videoTrack?.label)
-              if (videoTrack) {
-                const pub = await room.localParticipant.publishTrack(videoTrack, { source: Track.Source.Camera })
-                console.log('Published video track:', pub?.trackSid)
-              }
-              if (audioTrack) {
-                const pub = await room.localParticipant.publishTrack(audioTrack, { source: Track.Source.Microphone })
-                console.log('Published audio track:', pub?.trackSid)
-              }
-            }
-          } catch (err) {
-            console.error('Failed to connect to LiveKit room:', err)
-          }
-        } else {
-          streamRef.current?.getTracks().forEach(t => t.stop())
-          streamRef.current = null
-          if (videoRef.current) videoRef.current.srcObject = null
+          setBroadcastRoomName(res.roomName)
+          broadcasterRoomNamesRef.current[user.id] = res.roomName
         }
       }
     )
   }
 
   const stopBroadcast = () => {
-    streamRef.current?.getTracks().forEach(t => t.stop())
-    streamRef.current = null
-    if (videoRef.current) videoRef.current.srcObject = null
-
-    // Disconnect from LiveKit room
-    Object.values(livekitRoomsRef.current).forEach(room => room.disconnect())
-    livekitRoomsRef.current = {}
-
     socketRef.current?.emit('stopBroadcast', () => {
       setIsBroadcasting(false)
+      setBroadcastRoomName(null)
       setViewerCount(0)
       setViewRequests([])
     })
@@ -753,184 +671,15 @@ export default function ChatPage() {
     if (isLocked) {
       alert('This broadcast is locked. Request sent to broadcaster.')
     }
-    socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
-      if (res.success && res.approved && res.token && res.roomName) {
-        setLivekitTokens(prev => ({ ...prev, [res.roomName!]: res.token! }))
-        const url = res.livekitUrl || process.env.NEXT_PUBLIC_LIVEKIT_URL || ''
-        if (url) connectToBroadcaster(res.roomName, res.token, url, broadcasterId)
+    socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; roomName?: string; message?: string }) => {
+      if (res.success && res.approved && res.roomName) {
+        setViewingBroadcasts(prev => {
+          if (prev.find(b => b.broadcasterId === broadcasterId)) return prev
+          return [...prev, { broadcasterId, username: '', roomName: res.roomName! }]
+        })
       }
     })
   }
-
-  const connectToBroadcaster = useCallback(async (roomName: string, token: string, livekitUrl: string, broadcasterId?: string) => {
-    if (livekitRoomsRef.current[roomName]) {
-      console.log('Already connected to room:', roomName)
-      return
-    }
-
-    console.log('Connecting to LiveKit room:', roomName, 'broadcasterId:', broadcasterId, 'url:', livekitUrl)
-    console.log('Available video refs:', Object.keys(viewingVideoRefs.current))
-
-    const room = new LiveKitRoom({ 
-      adaptiveStream: true,
-      dynacast: true,
-    })
-    livekitRoomsRef.current[roomName] = room
-
-    let localStream: MediaStream | null = null
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      viewerStreamRef.current = localStream
-      setLocalViewerStream(localStream)
-      if (viewerVideoRef.current) {
-        viewerVideoRef.current.srcObject = localStream
-      }
-      console.log('Got local media stream for two-way video')
-    } catch (err) {
-      console.warn('Could not get local media for two-way video:', err)
-    }
-
-    room.on('trackSubscribed', (track, publication, participant) => {
-      console.log('Track subscribed:', track.kind, participant.identity, 'broadcasterId:', broadcasterId)
-      if (track.kind === Track.Kind.Video || track.kind === Track.Kind.Audio) {
-        const videoEls: HTMLVideoElement[] = []
-        
-        if (broadcasterId && viewingVideoRefs.current[broadcasterId]) {
-          console.log('Found viewingVideoRef for broadcaster:', broadcasterId)
-          videoEls.push(viewingVideoRefs.current[broadcasterId])
-        }
-        if (broadcasterVideoRefs.current[roomName]) {
-          console.log('Found broadcasterVideoRef for room:', roomName)
-          videoEls.push(broadcasterVideoRefs.current[roomName])
-        }
-        
-        if (videoEls.length > 0) {
-          console.log('Attaching track to', videoEls.length, 'video element(s)')
-          videoEls.forEach(el => track.attach(el))
-        } else {
-          console.log('No video element ready, storing pending track for:', broadcasterId || roomName)
-          const key = broadcasterId || roomName
-          if (!pendingTracksRef.current[key]) {
-            pendingTracksRef.current[key] = []
-          }
-          pendingTracksRef.current[key].push({ track, roomName })
-        }
-      }
-    })
-
-    room.on('trackUnsubscribed', (track, publication, participant) => {
-      console.log('Track unsubscribed:', track.kind, participant.identity)
-      track.detach()
-    })
-
-    try {
-      await room.connect(livekitUrl, token)
-      console.log('Connected to LiveKit room:', roomName)
-
-      if (localStream) {
-        const videoTrack = localStream.getVideoTracks()[0]
-        const audioTrack = localStream.getAudioTracks()[0]
-        console.log('Publishing viewer tracks - video:', !!videoTrack, 'audio:', !!audioTrack)
-        if (videoTrack) {
-          const pub = await room.localParticipant.publishTrack(videoTrack, { source: Track.Source.Camera })
-          console.log('Published viewer video track:', pub?.trackSid)
-        }
-        if (audioTrack) {
-          const pub = await room.localParticipant.publishTrack(audioTrack, { source: Track.Source.Microphone })
-          console.log('Published viewer audio track:', pub?.trackSid)
-        }
-      }
-
-      room.remoteParticipants.forEach(participant => {
-        participant.trackPublications.forEach(pub => {
-          if (pub.track && (pub.track.kind === Track.Kind.Video || pub.track.kind === Track.Kind.Audio)) {
-            console.log('Found existing track:', pub.track.kind, 'from', participant.identity)
-            const videoEls: HTMLVideoElement[] = []
-            
-            if (broadcasterId && viewingVideoRefs.current[broadcasterId]) {
-              console.log('Found viewingVideoRef for existing track:', broadcasterId)
-              videoEls.push(viewingVideoRefs.current[broadcasterId])
-            }
-            if (broadcasterVideoRefs.current[roomName]) {
-              console.log('Found broadcasterVideoRef for existing track:', roomName)
-              videoEls.push(broadcasterVideoRefs.current[roomName])
-            }
-            
-            if (videoEls.length > 0) {
-              console.log('Attaching existing track to', videoEls.length, 'video element(s)')
-              videoEls.forEach(el => pub.track!.attach(el))
-            } else {
-              console.log('No video element ready for existing track, storing pending')
-              const key = broadcasterId || roomName
-              if (!pendingTracksRef.current[key]) {
-                pendingTracksRef.current[key] = []
-              }
-              pendingTracksRef.current[key].push({ track: pub.track, roomName })
-            }
-          }
-        })
-      })
-
-    } catch (err) {
-      console.error('Failed to connect to LiveKit room:', err)
-      delete livekitRoomsRef.current[roomName]
-      if (localStream) {
-        localStream.getTracks().forEach(t => t.stop())
-      }
-      setLocalViewerStream(null)
-    }
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      Object.values(livekitRoomsRef.current).forEach(room => room.disconnect())
-      if (viewerStreamRef.current) {
-        viewerStreamRef.current.getTracks().forEach(t => t.stop())
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    Object.entries(viewingVideoEls).forEach(([broadcasterId, videoEl]) => {
-      const broadcast = viewingBroadcasts.find(b => b.broadcasterId === broadcasterId)
-      const keysToCheck = [broadcasterId, broadcast?.roomName].filter(Boolean) as string[]
-      keysToCheck.forEach(key => {
-        const pending = pendingTracksRef.current[key]
-        if (pending && pending.length > 0) {
-          pending.forEach(({ track }) => {
-            console.log('Attaching pending track (useEffect) to:', key)
-            track.attach(videoEl)
-          })
-          delete pendingTracksRef.current[key]
-        }
-      })
-    })
-  }, [viewingVideoEls, viewingBroadcasts])
-
-  // Connect to LiveKit when viewingBroadcasts changes and video elements are ready
-  useEffect(() => {
-    if (viewingBroadcasts.length === 0) return
-    
-    const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL
-    console.log('viewingBroadcasts changed:', viewingBroadcasts, 'livekitUrl:', livekitUrl)
-    if (!livekitUrl) {
-      console.error('NEXT_PUBLIC_LIVEKIT_URL not set!')
-      return
-    }
-    
-    viewingBroadcasts.forEach(broadcast => {
-      const token = livekitTokens[broadcast.roomName]
-      console.log('Checking broadcast:', broadcast.roomName, 'token:', token ? 'present' : 'missing', 'already connected:', !!livekitRoomsRef.current[broadcast.roomName])
-      if (!token || livekitRoomsRef.current[broadcast.roomName]) return
-      
-      // Set the ref for use in connectToBroadcaster
-      if (viewingVideoEls[broadcast.broadcasterId]) {
-        viewingVideoRefs.current[broadcast.broadcasterId] = viewingVideoEls[broadcast.broadcasterId]
-      }
-      
-      connectToBroadcaster(broadcast.roomName, token, livekitUrl, broadcast.broadcasterId)
-    })
-  }, [viewingBroadcasts, viewingVideoEls, livekitTokens, connectToBroadcaster])
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' })
@@ -1028,11 +777,15 @@ export default function ChatPage() {
       {(isBroadcasting || activeBroadcasters.length > 0) && (
         <div className="bg-gray-900 border-b border-gray-800 shrink-0">
           <div className="flex gap-3 p-3 overflow-x-auto">
-            {/* Own camera */}
-            {isBroadcasting && (
+            {/* Own camera - Jitsi meeting */}
+            {isBroadcasting && broadcastRoomName && (
               <div className="relative shrink-0 w-44 h-32 rounded-xl overflow-hidden bg-gray-800 ring-2 ring-pink-500">
-                <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
+                <JitsiVideo 
+                  roomName={broadcastRoomName}
+                  displayName={user.displayName || user.username}
+                  isBroadcaster={true}
+                />
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1 pointer-events-none">
                   <div className="flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
                     <span className="text-white text-xs font-medium truncate">{user.displayName || user.username}</span>
@@ -1043,8 +796,6 @@ export default function ChatPage() {
             {/* Other broadcasters */}
             {activeBroadcasters.filter(b => b.broadcasterId !== user.id).map(b => {
               const roomName = b.roomName
-              const hasToken = roomName && livekitTokens[roomName]
-              const isConnected = roomName && livekitRoomsRef.current[roomName]
               const isViewing = viewingBroadcasts.some(vb => vb.broadcasterId === b.broadcasterId)
               return (
                 <div 
@@ -1052,44 +803,26 @@ export default function ChatPage() {
                   className={`relative shrink-0 w-44 h-32 rounded-xl overflow-hidden bg-gray-800 cursor-pointer hover:ring-2 hover:ring-pink-400 ${isViewing ? 'ring-2 ring-green-500' : ''}`}
                   onClick={() => {
                     if (!isViewing && roomName && b.broadcasterId) {
-                      if (!hasToken) {
-                        requestView(b.broadcasterId, roomName, b.isLocked || false)
-                      }
+                      requestView(b.broadcasterId, roomName, b.isLocked || false)
                       setViewingBroadcasts(prev => [...prev, { broadcasterId: b.broadcasterId, username: b.displayName || b.username || '', roomName }])
                     }
                   }}
                 >
-                  <video 
-                    ref={el => { 
-                      if (el) {
-                        broadcasterVideoRefs.current[roomName!] = el
-                        // Check both broadcasterId and roomName keys for pending tracks
-                        const keysToCheck = [b.broadcasterId!, roomName!].filter(Boolean)
-                        keysToCheck.forEach(key => {
-                          const pending = pendingTracksRef.current[key]
-                          if (pending && pending.length > 0) {
-                            pending.forEach(({ track }) => {
-                              console.log('Attaching pending track to strip:', key)
-                              track.attach(el)
-                            })
-                            delete pendingTracksRef.current[key]
-                          }
-                        })
-                      }
-                    }}
-                    autoPlay 
-                    muted
-                    playsInline 
-                    className="w-full h-full object-cover"
-                  />
-                  {!isConnected && (
+                  {!isViewing && (
                     <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
                       <div className="w-14 h-14 rounded-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center text-white text-xl font-bold">
                         {(b.displayName || b.username)?.[0]?.toUpperCase() ?? '?'}
                       </div>
                     </div>
                   )}
-                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
+                  {isViewing && roomName && (
+                    <JitsiVideo 
+                      roomName={roomName}
+                      displayName={user.displayName || user.username}
+                      isBroadcaster={false}
+                    />
+                  )}
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1 pointer-events-none">
                     <div className="flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
                       <span className="text-white text-xs font-medium truncate">{b.displayName || b.username}</span>
@@ -1098,93 +831,6 @@ export default function ChatPage() {
                 </div>
               )
             })}
-          </div>
-        </div>
-      )}
-
-      {/* Viewing Broadcasts Grid */}
-      {viewingBroadcasts.length > 0 && (
-        <div className="bg-gray-900 border-b border-gray-800 p-3 shrink-0">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-white text-sm font-medium">Video Chat ({viewingBroadcasts.length + 1} participants)</span>
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-2">
-            {/* Your own video */}
-            <div className="relative shrink-0 w-48">
-              <div className="relative w-full aspect-video bg-gray-800 rounded-lg overflow-hidden ring-2 ring-pink-500">
-                <video 
-                  ref={viewerVideoRef}
-                  autoPlay 
-                  muted
-                  playsInline
-                  className="w-full h-full object-cover"
-                />
-                {!localViewerStream && (
-                  <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-xs">
-                    Starting camera...
-                  </div>
-                )}
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
-                  <span className="text-white text-xs truncate">You</span>
-                </div>
-              </div>
-            </div>
-            {/* Remote broadcasts */}
-            {viewingBroadcasts.map(broadcast => (
-              <div key={broadcast.broadcasterId} className="relative shrink-0 w-48">
-                <div className="relative w-full aspect-video bg-gray-800 rounded-lg overflow-hidden">
-                  <video 
-                    ref={(el) => {
-                      if (el) {
-                        viewingVideoRefs.current[broadcast.broadcasterId] = el
-                        setViewingVideoEls(prev => ({ ...prev, [broadcast.broadcasterId]: el }))
-                        // Check both broadcasterId and roomName keys for pending tracks
-                        const keysToCheck = [broadcast.broadcasterId, broadcast.roomName].filter(Boolean)
-                        keysToCheck.forEach(key => {
-                          const pending = pendingTracksRef.current[key]
-                          if (pending && pending.length > 0) {
-                            pending.forEach(({ track }) => {
-                              console.log('Attaching pending track to grid:', key)
-                              track.attach(el)
-                            })
-                            delete pendingTracksRef.current[key]
-                          }
-                        })
-                      }
-                    }}
-                    autoPlay 
-                    muted
-                    playsInline
-                    className="w-full h-full object-cover"
-                  />
-                  {!livekitRoomsRef.current[broadcast.roomName] && (
-                    <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-xs">
-                      Connecting...
-                    </div>
-                  )}
-                  <button 
-                    onClick={() => {
-                      const remaining = viewingBroadcasts.filter(b => b.broadcasterId !== broadcast.broadcasterId)
-                      setViewingBroadcasts(remaining)
-                      if (viewingVideoRefs.current[broadcast.broadcasterId]) {
-                        viewingVideoRefs.current[broadcast.broadcasterId].srcObject = null
-                      }
-                      if (remaining.length === 0 && viewerStreamRef.current) {
-                        viewerStreamRef.current.getTracks().forEach(t => t.stop())
-                        viewerStreamRef.current = null
-                        setLocalViewerStream(null)
-                      }
-                    }}
-                    className="absolute top-1 right-1 w-6 h-6 bg-black/50 rounded-full flex items-center justify-center text-white text-xs hover:bg-black/70"
-                  >
-                    ✕
-                  </button>
-                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
-                    <span className="text-white text-xs truncate">{broadcast.username}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
           </div>
         </div>
       )}
@@ -1672,11 +1318,7 @@ export default function ChatPage() {
                 if (!viewingBroadcasts.find(b => b.broadcasterId === userId)) {
                   setViewingBroadcasts(prev => [...prev, { broadcasterId: userId, username: broadcaster?.username || '', roomName: roomName || '' }])
                 }
-                socketRef.current?.emit('viewRequest', { broadcasterId: userId }, (res: { success: boolean; approved?: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
-                  if (res.success && res.approved && res.token && res.roomName) {
-                    setLivekitTokens(prev => ({ ...prev, [res.roomName!]: res.token! }))
-                  }
-                })
+                socketRef.current?.emit('viewRequest', { broadcasterId: userId })
               }}
             />
           </div>
