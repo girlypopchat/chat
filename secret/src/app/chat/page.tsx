@@ -626,8 +626,8 @@ export default function ChatPage() {
   // ============================================
 
   const startBroadcast = async () => {
-    if (!socketRef.current) {
-      console.error('Socket not connected')
+    if (!socketRef.current || !user) {
+      console.error('Socket not connected or user not loaded')
       return
     }
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 declare global {
   interface Window {
@@ -19,11 +19,34 @@ interface JitsiVideoProps {
 export default function JitsiVideo({ roomName, displayName, isBroadcaster = false, onReady, onParticipantLeft }: JitsiVideoProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const apiRef = useRef<any>(null)
+  const [scriptLoaded, setScriptLoaded] = useState(false)
 
   useEffect(() => {
+    if (window.JitsiMeetExternalAPI) {
+      setScriptLoaded(true)
+      return
+    }
+
     const domain = process.env.NEXT_PUBLIC_JITSI_DOMAIN || 'meet.jit.si'
-    
-    if (!containerRef.current || !roomName) return
+    const script = document.createElement('script')
+    script.src = `https://${domain}/external_api.js`
+    script.async = true
+    script.onload = () => setScriptLoaded(true)
+    script.onerror = () => console.error('Failed to load Jitsi script')
+    document.body.appendChild(script)
+
+    return () => {
+      if (apiRef.current) {
+        apiRef.current.dispose()
+        apiRef.current = null
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!scriptLoaded || !containerRef.current || !roomName || apiRef.current) return
+
+    const domain = process.env.NEXT_PUBLIC_JITSI_DOMAIN || 'meet.jit.si'
 
     const options: any = {
       roomName: `GirlyPopChat-${roomName}`,
@@ -43,32 +66,20 @@ export default function JitsiVideo({ roomName, displayName, isBroadcaster = fals
         SHOW_JITSI_WATERMARK: false,
         SHOW_WATERMARK_FOR_GUESTS: false,
         DEFAULT_BACKGROUND: '#1f1f1f',
-        TOOLBAR_BUTTONS: [
-          'microphone', 'camera', 'desktop', 'fullscreen',
-          'fodeviceselection', 'hangup', 'profile', 'chat',
-          'settings', 'raisehand', 'videoquality', 'filmstrip',
-          'shortcuts', 'tileview', 'select-background', 'help', 'mute-everyone'
-        ],
       },
     }
 
-    if (window.JitsiMeetExternalAPI) {
-      apiRef.current = new window.JitsiMeetExternalAPI(domain, options)
+    apiRef.current = new window.JitsiMeetExternalAPI(domain, options)
 
-      apiRef.current.addEventListener('videoConferenceJoined', () => {
-        console.log('Jitsi: Joined conference')
-        onReady?.()
-      })
+    apiRef.current.addEventListener('videoConferenceJoined', () => {
+      console.log('Jitsi: Joined conference')
+      onReady?.()
+    })
 
-      apiRef.current.addEventListener('videoConferenceLeft', () => {
-        console.log('Jitsi: Left conference')
-        onParticipantLeft?.()
-      })
-
-      apiRef.current.addEventListener('participantLeft', () => {
-        console.log('Jitsi: Participant left')
-      })
-    }
+    apiRef.current.addEventListener('videoConferenceLeft', () => {
+      console.log('Jitsi: Left conference')
+      onParticipantLeft?.()
+    })
 
     return () => {
       if (apiRef.current) {
@@ -76,28 +87,7 @@ export default function JitsiVideo({ roomName, displayName, isBroadcaster = fals
         apiRef.current = null
       }
     }
-  }, [roomName, displayName, isBroadcaster, onReady, onParticipantLeft])
-
-  useEffect(() => {
-    const loadJitsiScript = () => {
-      if (window.JitsiMeetExternalAPI) return Promise.resolve()
-      
-      return new Promise<void>((resolve) => {
-        const script = document.createElement('script')
-        const domain = process.env.NEXT_PUBLIC_JITSI_DOMAIN || 'meet.jit.si'
-        script.src = `https://${domain}/external_api.js`
-        script.async = true
-        script.onload = () => resolve()
-        script.onerror = () => {
-          console.error('Failed to load Jitsi script')
-          resolve()
-        }
-        document.body.appendChild(script)
-      })
-    }
-
-    loadJitsiScript()
-  }, [])
+  }, [scriptLoaded, roomName, displayName, isBroadcaster, onReady, onParticipantLeft])
 
   return (
     <div 
