@@ -44,11 +44,15 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { name, displayName, description, icon, isNSFW, userId } = body
+    const { name, displayName, description, icon, isNSFW, userId, roomType, accessMode, vibePreset } = body
 
     if (!name || !displayName || !userId) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
     }
+
+    const validRoomTypes = ['text', 'video', 'music', 'cinema', 'event', 'rave', 'library']
+    const validAccessModes = ['public', 'password', 'secret']
+    const validVibes = ['cozy', 'party', 'focus', 'sleepover']
 
     // Check if room name already exists
     const existingRoom = await db.room.findUnique({ where: { name } })
@@ -71,6 +75,9 @@ export async function POST(request: NextRequest) {
         displayName,
         description,
         icon,
+        roomType: validRoomTypes.includes(roomType) ? roomType : 'text',
+        accessMode: validAccessModes.includes(accessMode) ? accessMode : 'public',
+        vibePreset: validVibes.includes(vibePreset) ? vibePreset : 'cozy',
         isNSFW: isNSFW || false,
         createdById: userId,
         sponsorCount: 1,

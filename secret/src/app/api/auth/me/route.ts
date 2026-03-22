@@ -27,6 +27,15 @@ export async function GET(request: NextRequest) {
       role: session.user.role,
       trustScore: session.user.trustScore,
       ageVerified: session.user.ageVerified,
+      identitySetup: session.user.identitySetup,
+      firstName: session.user.firstName,
+      lastName: session.user.lastName,
+      lastNameEmoji: session.user.lastNameEmoji,
+      genderIcon: session.user.genderIcon,
+      displayMode: session.user.displayMode,
+      privacyMode: session.user.privacyMode,
+      allowDmsFrom: session.user.allowDmsFrom,
+      showOnlineStatus: session.user.showOnlineStatus,
     },
   })
 }

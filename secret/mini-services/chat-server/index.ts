@@ -4,7 +4,8 @@
 import { Server as HttpServer } from 'http'
 import { Server as SocketIOServer, Socket } from 'socket.io'
 import { db } from '../../src/lib/db'
-import { generateViewerToken, generateBroadcasterToken, addViewRequest, getViewRequests, removeViewRequest, clearViewRequests } from '../../src/lib/livekit'
+import { generateViewerToken, generateBroadcasterToken, generateTwoWayToken, addViewRequest, getViewRequests, removeViewRequest, clearViewRequests } from '../../src/lib/livekit'
+import { canDm, getOrCreateConversation, getOtherUserId } from '../../src/lib/dm'
 
 // ============================================
 // Types
@@ -48,7 +49,7 @@ class GirlyPopChatServer {
   constructor(httpServer: HttpServer) {
     this.io = new SocketIOServer(httpServer, {
       cors: {
-        origin: process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+        origin: ['https://girlypopchat.com', 'http://localhost:3000'],
         methods: ['GET', 'POST'],
         credentials: true,
       },
@@ -104,6 +105,9 @@ class GirlyPopChatServer {
     this.io.on('connection', (socket: UserSocket) => {
       console.log(`✅ Connected: ${socket.user?.username} (${socket.userId})`)
 
+      // Join personal DM channel
+      socket.join(`dm:${socket.userId}`)
+
       // Room events
       socket.on('joinRoom', (data) => this.handleJoinRoom(socket, data))
       socket.on('leaveRoom', (data) => this.handleLeaveRoom(socket, data))
@@ -126,6 +130,11 @@ class GirlyPopChatServer {
       socket.on('poke', (data) => this.handlePoke(socket, data))
       socket.on('idle', (data) => this.handleIdle(socket, data))
       socket.on('typing', (data) => this.handleTyping(socket, data))
+
+      // DM events
+      socket.on('dm:send', (data, cb) => this.handleDmSend(socket, data, cb))
+      socket.on('dm:read', (data) => this.handleDmRead(socket, data))
+      socket.on('dm:typing', (data) => this.handleDmTyping(socket, data))
 
       // Disconnect
       socket.on('disconnect', () => this.handleDisconnect(socket))
@@ -365,6 +374,10 @@ class GirlyPopChatServer {
   // ============================================
 
   private async handleStartBroadcast(socket: UserSocket, data: { source: 'camera' | 'screen'; locked?: boolean }, callback: Function) {
+    if (!socket.user?.ageVerified) {
+      return callback({ success: false, message: 'Age verification required to broadcast' })
+    }
+
     if (!socket.currentRoom) {
       return callback({ success: false, message: 'Must be in a room to broadcast' })
     }
@@ -396,8 +409,8 @@ class GirlyPopChatServer {
 
     socket.isBroadcasting = true
 
-    // Notify room
-    socket.to(`room:${socket.currentRoom}`).emit('broadcastStarted', {
+    // Notify ALL users (not just those in same room)
+    this.io.emit('broadcastStarted', {
       broadcasterId: socket.userId,
       username: socket.user?.username,
       displayName: socket.user?.displayName,
@@ -446,39 +459,16 @@ class GirlyPopChatServer {
       return callback({ success: false, message: 'Broadcast not found' })
     }
 
-    // If not locked, auto-approve
-    if (!broadcast.isLocked) {
-      const token = await generateViewerToken(broadcast.livekitRoom, socket.userId!, socket.user!.username)
-      broadcast.viewerCount++
-      
-      return callback({
-        success: true,
-        approved: true,
-        token,
-        roomName: broadcast.roomName,
-        livekitUrl: process.env.LIVEKIT_URL,
-      })
-    }
-
-    // Locked broadcast - send request to broadcaster
-    addViewRequest(data.broadcasterId, {
-      viewerId: socket.userId!,
-      viewerName: socket.user!.username,
-      viewerAvatar: socket.user?.avatar || undefined,
-      requestedAt: Date.now(),
+    const token = await generateTwoWayToken(broadcast.livekitRoom, socket.userId!, socket.user!.username)
+    broadcast.viewerCount++
+    
+    return callback({
+      success: true,
+      approved: true,
+      token,
+      roomName: broadcast.roomName,
+      livekitUrl: process.env.LIVEKIT_URL,
     })
-
-    // Notify broadcaster
-    const broadcasterSocket = connectedUsers.get(data.broadcasterId)
-    if (broadcasterSocket) {
-      broadcasterSocket.emit('viewRequest', {
-        viewerId: socket.userId,
-        viewerName: socket.user?.username,
-        viewerAvatar: socket.user?.avatar,
-      })
-    }
-
-    callback({ success: true, approved: false, message: 'Request sent to broadcaster' })
   }
 
   private async handleViewResponse(socket: UserSocket, data: { viewerId: string; approved: boolean }, callback: Function) {
@@ -499,7 +489,7 @@ class GirlyPopChatServer {
     }
 
     if (data.approved) {
-      const token = await generateViewerToken(broadcast.livekitRoom, data.viewerId, viewerSocket.user!.username)
+      const token = await generateTwoWayToken(broadcast.livekitRoom, data.viewerId, viewerSocket.user!.username)
       broadcast.viewerCount++
 
       viewerSocket.emit('viewResponse', {
@@ -536,6 +526,84 @@ class GirlyPopChatServer {
     }
 
     callback({ success: true, locked: data.locked })
+  }
+
+  // ============================================
+  // DM Handlers
+  // ============================================
+
+  private async handleDmSend(socket: UserSocket, data: { conversationId: string; content: string; imageUrl?: string }, callback: Function) {
+    if (!data.conversationId || (!data.content?.trim() && !data.imageUrl)) {
+      return callback?.({ success: false, message: 'Missing content' })
+    }
+
+    const conv = await db.directConversation.findUnique({ where: { id: data.conversationId } })
+    if (!conv || (conv.userAId !== socket.userId && conv.userBId !== socket.userId)) {
+      return callback?.({ success: false, message: 'Conversation not found' })
+    }
+
+    const otherId = getOtherUserId(conv, socket.userId!)
+    const check = await canDm(socket.userId!, otherId)
+    if (!check.allowed) {
+      return callback?.({ success: false, message: check.reason })
+    }
+
+    const message = await db.directMessage.create({
+      data: {
+        conversationId: data.conversationId,
+        senderId: socket.userId!,
+        content: data.content?.trim() || '',
+        imageUrl: data.imageUrl || null,
+      },
+      include: { sender: { select: { id: true, username: true, displayName: true, avatar: true } } },
+    })
+
+    await db.directConversation.update({
+      where: { id: data.conversationId },
+      data: { lastMessageAt: new Date() },
+    })
+
+    const payload = {
+      id: message.id,
+      conversationId: data.conversationId,
+      sender: message.sender,
+      content: message.content,
+      imageUrl: message.imageUrl,
+      createdAt: message.createdAt,
+    }
+
+    // Emit to both users
+    this.io.to(`dm:${socket.userId}`).to(`dm:${otherId}`).emit('dm:message', payload)
+    callback?.({ success: true, message: payload })
+  }
+
+  private async handleDmRead(socket: UserSocket, data: { conversationId: string }) {
+    if (!data.conversationId) return
+
+    await db.directMessage.updateMany({
+      where: { conversationId: data.conversationId, senderId: { not: socket.userId! }, isRead: false },
+      data: { isRead: true },
+    })
+
+    const conv = await db.directConversation.findUnique({ where: { id: data.conversationId } })
+    if (!conv) return
+    const otherId = getOtherUserId(conv, socket.userId!)
+
+    this.io.to(`dm:${otherId}`).emit('dm:read', { conversationId: data.conversationId, readBy: socket.userId })
+  }
+
+  private handleDmTyping(socket: UserSocket, data: { conversationId: string; isTyping: boolean }) {
+    // Find the other user in the conversation and emit to them
+    db.directConversation.findUnique({ where: { id: data.conversationId } }).then(conv => {
+      if (!conv) return
+      const otherId = getOtherUserId(conv, socket.userId!)
+      this.io.to(`dm:${otherId}`).emit('dm:typing', {
+        conversationId: data.conversationId,
+        userId: socket.userId,
+        username: socket.user?.username,
+        isTyping: data.isTyping,
+      })
+    })
   }
 
   // ============================================
@@ -614,6 +682,10 @@ async function main() {
   })
 }
 
-main().catch(console.error)
+// Only auto-start when run directly (not when imported by server.ts)
+const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))
+if (isMain) {
+  main().catch(console.error)
+}
 
 export { GirlyPopChatServer }

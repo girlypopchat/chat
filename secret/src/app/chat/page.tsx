@@ -2,9 +2,13 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { io, Socket } from 'socket.io-client'
+import { Room as LiveKitRoom, Track } from 'livekit-client'
+import UserProfileCard from '@/components/user-profile-card'
+import DmPanel from '@/components/dm-panel'
+import { ROOM_TYPES, ACCESS_MODES, VIBE_PRESETS } from '@/lib/room-config'
 import { 
   MoreVertical, Edit2, Trash2, Smile, Image, X, Check, 
-  Reply, Copy, ExternalLink, Clock, User, Hash, Plus
+  Reply, Copy, ExternalLink, Clock, User, Hash, Plus, Settings, Eye, MessageSquare
 } from 'lucide-react'
 
 // ============================================
@@ -67,6 +71,9 @@ interface Room {
   displayName: string
   description?: string
   icon?: string
+  roomType: string
+  accessMode: string
+  vibePreset: string
   memberCount: number
   isNSFW: boolean
 }
@@ -90,10 +97,6 @@ interface RoomProposal {
     user: { username: string; displayName?: string; avatar?: string }
   }>
 }
-
-// LiveKit
-import { LiveKitRoom, VideoConference, useLocalParticipant } from '@livekit/components-react'
-import '@livekit/components-styles'
 
 const REQUIRED_SPONSORS = 5
 
@@ -119,12 +122,24 @@ export default function ChatPage() {
   const [connected, setConnected] = useState(false)
   const [user, setUser] = useState<any>(null)
   const [isBroadcasting, setIsBroadcasting] = useState(false)
-  const [livekitToken, setLivekitToken] = useState<string | null>(null)
-  const [livekitRoom, setLivekitRoom] = useState<string | null>(null)
   const [isLocked, setIsLocked] = useState(false)
   const [viewerCount, setViewerCount] = useState(0)
   const [viewRequests, setViewRequests] = useState<ViewRequest[]>([])
   const [currentRoom, setCurrentRoom] = useState<string | null>(null)
+  const [activeBroadcasters, setActiveBroadcasters] = useState<{
+    broadcasterId: string
+    username: string
+    displayName?: string
+    roomName?: string
+    isLocked?: boolean
+    viewToken?: string
+    isViewing?: boolean
+  }[]>([])
+  const [livekitTokens, setLivekitTokens] = useState<Record<string, string>>({})
+  const [viewingBroadcasts, setViewingBroadcasts] = useState<Array<{ broadcasterId: string; username: string; roomName: string }>>([])
+  const [viewingVideoEls, setViewingVideoEls] = useState<Record<string, HTMLVideoElement>>({})
+  const [localViewerStream, setLocalViewerStream] = useState<MediaStream | null>(null)
+  const viewingVideoRefs = useRef<Record<string, HTMLVideoElement>>({})
   
   // New feature states
   const [editing, setEditing] = useState<EditingState | null>(null)
@@ -134,16 +149,21 @@ export default function ChatPage() {
   const [uploadingImage, setUploadingImage] = useState(false)
   const [typingUsers, setTypingUsers] = useState<{ userId: string; username: string }[]>([])
   const [previewImage, setPreviewImage] = useState<string | null>(null)
+  const [profileCard, setProfileCard] = useState<{ userId: string; username: string; displayName?: string; avatar?: string; x: number; y: number } | null>(null)
+  const [showViewers, setShowViewers] = useState(false)
   
   // Room management states
   const [rooms, setRooms] = useState<Room[]>([])
   const [proposals, setProposals] = useState<RoomProposal[]>([])
-  const [sidebarTab, setSidebarTab] = useState<'rooms' | 'users'>('rooms')
+  const [sidebarTab, setSidebarTab] = useState<'rooms' | 'users' | 'dms'>('rooms')
   const [showCreateRoom, setShowCreateRoom] = useState(false)
   const [newRoomName, setNewRoomName] = useState('')
   const [newRoomDisplayName, setNewRoomDisplayName] = useState('')
   const [newRoomDescription, setNewRoomDescription] = useState('')
   const [newRoomIcon, setNewRoomIcon] = useState('💬')
+  const [newRoomType, setNewRoomType] = useState('text')
+  const [newAccessMode, setNewAccessMode] = useState('public')
+  const [newVibePreset, setNewVibePreset] = useState('cozy')
   const [creatingRoom, setCreatingRoom] = useState(false)
 
   // Refs
@@ -151,6 +171,15 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const livekitRoomsRef = useRef<Record<string, LiveKitRoom>>({})
+  const broadcasterVideoRefs = useRef<Record<string, HTMLVideoElement>>({})
+  const broadcasterRoomNamesRef = useRef<Record<string, string>>({}) // broadcasterId -> roomName
+  const pendingTracksRef = useRef<Record<string, Array<{ track: any; roomName: string }>>>({})
+  const currentUserIdRef = useRef<string | null>(null)
+  const viewerStreamRef = useRef<MediaStream | null>(null)
+  const viewerVideoRef = useRef<HTMLVideoElement | null>(null)
 
   // ============================================
   // Effects
@@ -164,7 +193,16 @@ export default function ChatPage() {
           window.location.href = '/login'
           return
         }
+        if (!data.user.ageVerified) {
+          window.location.href = '/verify'
+          return
+        }
+        if (!data.user.identitySetup) {
+          window.location.href = '/setup'
+          return
+        }
         setUser(data.user)
+        currentUserIdRef.current = data.user.id
         connectSocket(data.user)
       })
       .catch(() => window.location.href = '/login')
@@ -211,6 +249,12 @@ export default function ChatPage() {
   }
 
   useEffect(() => {
+    if (isBroadcasting && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current
+    }
+  }, [isBroadcasting])
+
+  useEffect(() => {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight)
   }, [messages])
 
@@ -250,91 +294,159 @@ export default function ChatPage() {
   // Socket Connection
   // ============================================
 
-  const connectSocket = (userData: any) => {
-    const sessionToken = document.cookie
-      .split('; ')
-      .find(row => row.startsWith('session_token='))
-      ?.split('=')[1]
+  const connectSocket = async (userData: any) => {
+    try {
+      const res = await fetch('/api/auth/socket-token')
+      if (!res.ok) {
+        console.error('Socket token fetch failed:', res.status)
+        return
+      }
+      const data = await res.json()
+      if (!data.token) {
+        console.error('No token in response:', data)
+        return
+      }
 
-    if (!sessionToken) return
+      const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || window.location.origin, {
+        auth: { sessionToken: data.token },
+        transports: ['websocket', 'polling'],
+        timeout: 10000,
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+      })
 
-    const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001', {
-      auth: { sessionToken },
-      transports: ['websocket'],
-    })
+      socket.on('connect', () => {
+        console.log('Socket connected:', socket.id)
+        setConnected(true)
+      })
+      socket.on('disconnect', (reason) => {
+        console.log('Socket disconnected:', reason)
+        setConnected(false)
+      })
+      socket.on('connect_error', (error) => {
+        console.error('Socket connection error:', error.message)
+      })
+      socket.on('connect_timeout', () => {
+        console.error('Socket connection timeout')
+      })
+      socket.on('error', (error) => {
+        console.error('Socket error:', error)
+      })
 
-    socket.on('connect', () => setConnected(true))
-    socket.on('disconnect', () => setConnected(false))
+      socket.on('message', (msg: Message) => {
+        setMessages(prev => [...prev.slice(-199), msg])
+      })
 
-    // Messages
-    socket.on('message', (msg: Message) => {
-      setMessages(prev => [...prev.slice(-199), msg])
-    })
+      socket.on('messageEdited', (data: { messageId: string; content: string; isEdited: boolean }) => {
+        setMessages(prev => prev.map(m => 
+          m._id === data.messageId 
+            ? { ...m, text: data.content, isEdited: true } 
+            : m
+        ))
+      })
 
-    socket.on('messageEdited', (data: { messageId: string; content: string; isEdited: boolean }) => {
-      setMessages(prev => prev.map(m => 
-        m._id === data.messageId 
-          ? { ...m, text: data.content, isEdited: true } 
-          : m
-      ))
-    })
+      socket.on('messageDeleted', (data: { messageId: string }) => {
+        setMessages(prev => prev.map(m => 
+          m._id === data.messageId 
+            ? { ...m, isDeleted: true, text: '[message deleted]' } 
+            : m
+        ))
+      })
 
-    socket.on('messageDeleted', (data: { messageId: string }) => {
-      setMessages(prev => prev.map(m => 
-        m._id === data.messageId 
-          ? { ...m, isDeleted: true, text: '[message deleted]' } 
-          : m
-      ))
-    })
+      socket.on('messageReacted', (data: { messageId: string; reactions: Reaction[] }) => {
+        setMessages(prev => prev.map(m => 
+          m._id === data.messageId 
+            ? { ...m, reactions: data.reactions } 
+            : m
+        ))
+      })
 
-    socket.on('messageReacted', (data: { messageId: string; reactions: Reaction[] }) => {
-      setMessages(prev => prev.map(m => 
-        m._id === data.messageId 
-          ? { ...m, reactions: data.reactions } 
-          : m
-      ))
-    })
+      // Users
+      socket.on('userJoin', ({ user }: { user: User }) => {
+        setUsers(prev => [...prev.filter(u => u.userId !== user.userId), user])
+      })
 
-    // Users
-    socket.on('userJoin', ({ user }: { user: User }) => {
-      setUsers(prev => [...prev.filter(u => u.userId !== user.userId), user])
-    })
+      socket.on('userLeave', ({ userId }: { userId: string }) => {
+        setUsers(prev => prev.filter(u => u.userId !== userId))
+      })
 
-    socket.on('userLeave', ({ userId }: { userId: string }) => {
-      setUsers(prev => prev.filter(u => u.userId !== userId))
-    })
-
-    socket.on('userTyping', (data: { userId: string; username: string; isTyping: boolean }) => {
-      setTypingUsers(prev => {
-        if (data.isTyping) {
-          if (!prev.find(u => u.userId === data.userId)) {
-            return [...prev, { userId: data.userId, username: data.username }]
+      socket.on('userTyping', (data: { userId: string; username: string; isTyping: boolean }) => {
+        setTypingUsers(prev => {
+          if (data.isTyping) {
+            if (!prev.find(u => u.userId === data.userId)) {
+              return [...prev, { userId: data.userId, username: data.username }]
+            }
+            return prev
+          } else {
+            return prev.filter(u => u.userId !== data.userId)
           }
-          return prev
-        } else {
-          return prev.filter(u => u.userId !== data.userId)
+        })
+      })
+
+      // Broadcast
+      socket.on('broadcastStarted', ({ broadcasterId, username, displayName, roomName, isLocked }: { broadcasterId: string; username: string; displayName?: string; roomName?: string; isLocked?: boolean }) => {
+        setActiveBroadcasters(prev => [...prev.filter(b => b.broadcasterId !== broadcasterId), { broadcasterId, username, displayName, roomName, isLocked }])
+        
+        if (roomName && broadcasterId !== currentUserIdRef.current && socketRef.current) {
+          console.log('Auto-requesting view for broadcaster:', broadcasterId, 'roomName:', roomName, 'myId:', currentUserIdRef.current)
+          socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
+            console.log('viewRequest response:', res)
+            if (res.success && res.approved && res.token && res.roomName) {
+              setLivekitTokens(prev => ({ ...prev, [res.roomName!]: res.token! }))
+              setViewingBroadcasts(prev => {
+                if (prev.find(b => b.broadcasterId === broadcasterId)) return prev
+                return [...prev, { broadcasterId, username: username || '', roomName: res.roomName! }]
+              })
+            }
+          })
         }
       })
-    })
 
-    // Broadcast
-    socket.on('broadcastStarted', ({ userId, username }: { userId: string; username: string }) => {
-      // Someone else started broadcasting
-    })
+      socket.on('broadcastStopped', ({ broadcasterId }: { broadcasterId: string }) => {
+        setActiveBroadcasters(prev => prev.filter(b => b.broadcasterId !== broadcasterId))
+        setViewingBroadcasts(prev => prev.filter(b => b.broadcasterId !== broadcasterId))
+        setLivekitTokens(prev => {
+          const next = { ...prev }
+          Object.keys(next).forEach(key => {
+            if (key.includes(broadcasterId)) delete next[key]
+          })
+          return next
+        })
+      })
 
-    socket.on('viewRequest', (request: ViewRequest) => {
-      setViewRequests(prev => [...prev, request])
-    })
+      socket.on('viewRequest', (request: ViewRequest) => {
+        setViewRequests(prev => [...prev, request])
+      })
 
-    socket.on('viewerJoined', ({ viewerCount }: { viewerCount: number }) => {
-      setViewerCount(viewerCount)
-    })
+      socket.on('viewerJoined', ({ viewerCount }: { viewerCount: number }) => {
+        setViewerCount(viewerCount)
+      })
 
-    socket.on('roomJoined', ({ room }: { room: any }) => {
-      setCurrentRoom(room.id)
-    })
+      socket.on('viewResponse', ({ approved, token, roomName, livekitUrl, message }: { approved: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
+        if (approved && token && roomName) {
+          setLivekitTokens(prev => ({ ...prev, [roomName]: token }))
+        } else if (message) {
+          console.log('View request denied:', message)
+        }
+      })
 
-    socketRef.current = socket
+      socket.on('roomJoined', ({ room, users: roomUsers, activeBroadcasts }: { room: any; users: User[]; activeBroadcasts: any[] }) => {
+        setCurrentRoom(room.id)
+        setUsers(roomUsers || [])
+        setActiveBroadcasters((activeBroadcasts || []).map((b: any) => ({
+          broadcasterId: b.broadcasterId,
+          username: b.username || '',
+          displayName: b.displayName,
+          roomName: b.roomName,
+          isLocked: b.isLocked,
+        })))
+      })
+
+      socketRef.current = socket
+    } catch (error) {
+      console.error('connectSocket error:', error)
+    }
   }
 
   // ============================================
@@ -470,6 +582,9 @@ export default function ChatPage() {
           displayName: newRoomDisplayName,
           description: newRoomDescription,
           icon: newRoomIcon,
+          roomType: newRoomType,
+          accessMode: newAccessMode,
+          vibePreset: newVibePreset,
           userId: user.id,
         }),
       })
@@ -536,24 +651,85 @@ export default function ChatPage() {
   // ============================================
 
   const startBroadcast = async () => {
-    if (!socketRef.current) return
+    if (!socketRef.current) {
+      console.error('Socket not connected')
+      return
+    }
 
+    console.log('Socket connected:', socketRef.current.connected)
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      streamRef.current = stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+      }
+      console.log('Got media stream, tracks:', stream.getTracks().length)
+    } catch (err) {
+      console.error('getUserMedia failed:', err)
+      alert('Camera access denied. Please allow camera permissions.')
+      return
+    }
+
+    console.log('Emitting startBroadcast...')
     socketRef.current.emit('startBroadcast', { source: 'camera', locked: isLocked }, 
-      (res: { success: boolean; token?: string; roomName?: string; message?: string }) => {
-        if (res.success && res.token) {
+      async (res: { success: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
+        console.log('startBroadcast callback:', res)
+        if (res.success && res.token && res.roomName && res.livekitUrl) {
           setIsBroadcasting(true)
-          setLivekitToken(res.token)
-          setLivekitRoom(res.roomName ?? null)
+          
+          // Connect broadcaster to their own LiveKit room
+          const room = new LiveKitRoom()
+          livekitRoomsRef.current[res.roomName] = room
+          
+          try {
+            console.log('Connecting to LiveKit:', res.livekitUrl, 'room:', res.roomName, 'token:', res.token ? 'present' : 'MISSING')
+            try {
+              await room.connect(res.livekitUrl, res.token)
+            } catch (connectErr) {
+              console.error('LiveKit connect error:', connectErr)
+              throw connectErr
+            }
+            console.log('Connected to own broadcast room:', res.roomName)
+            
+            // Publish local tracks
+            if (streamRef.current) {
+              const videoTrack = streamRef.current.getVideoTracks()[0]
+              const audioTrack = streamRef.current.getAudioTracks()[0]
+              console.log('Publishing tracks - video:', !!videoTrack, 'audio:', !!audioTrack)
+              console.log('Video track info:', videoTrack?.kind, videoTrack?.label)
+              if (videoTrack) {
+                const pub = await room.localParticipant.publishTrack(videoTrack, { source: Track.Source.Camera })
+                console.log('Published video track:', pub?.trackSid)
+              }
+              if (audioTrack) {
+                const pub = await room.localParticipant.publishTrack(audioTrack, { source: Track.Source.Microphone })
+                console.log('Published audio track:', pub?.trackSid)
+              }
+            }
+          } catch (err) {
+            console.error('Failed to connect to LiveKit room:', err)
+          }
+        } else {
+          streamRef.current?.getTracks().forEach(t => t.stop())
+          streamRef.current = null
+          if (videoRef.current) videoRef.current.srcObject = null
         }
       }
     )
   }
 
   const stopBroadcast = () => {
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    streamRef.current = null
+    if (videoRef.current) videoRef.current.srcObject = null
+
+    // Disconnect from LiveKit room
+    Object.values(livekitRoomsRef.current).forEach(room => room.disconnect())
+    livekitRoomsRef.current = {}
+
     socketRef.current?.emit('stopBroadcast', () => {
       setIsBroadcasting(false)
-      setLivekitToken(null)
-      setLivekitRoom(null)
       setViewerCount(0)
       setViewRequests([])
     })
@@ -572,6 +748,190 @@ export default function ChatPage() {
     setViewRequests(prev => prev.filter(r => r.viewerId !== viewerId))
   }
 
+  const requestView = (broadcasterId: string, roomName: string, isLocked: boolean) => {
+    if (!socketRef.current) return
+    if (isLocked) {
+      alert('This broadcast is locked. Request sent to broadcaster.')
+    }
+    socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
+      if (res.success && res.approved && res.token && res.roomName) {
+        setLivekitTokens(prev => ({ ...prev, [res.roomName!]: res.token! }))
+        const url = res.livekitUrl || process.env.NEXT_PUBLIC_LIVEKIT_URL || ''
+        if (url) connectToBroadcaster(res.roomName, res.token, url, broadcasterId)
+      }
+    })
+  }
+
+  const connectToBroadcaster = useCallback(async (roomName: string, token: string, livekitUrl: string, broadcasterId?: string) => {
+    if (livekitRoomsRef.current[roomName]) {
+      console.log('Already connected to room:', roomName)
+      return
+    }
+
+    console.log('Connecting to LiveKit room:', roomName, 'broadcasterId:', broadcasterId, 'url:', livekitUrl)
+    console.log('Available video refs:', Object.keys(viewingVideoRefs.current))
+
+    const room = new LiveKitRoom({ 
+      adaptiveStream: true,
+      dynacast: true,
+    })
+    livekitRoomsRef.current[roomName] = room
+
+    let localStream: MediaStream | null = null
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      viewerStreamRef.current = localStream
+      setLocalViewerStream(localStream)
+      if (viewerVideoRef.current) {
+        viewerVideoRef.current.srcObject = localStream
+      }
+      console.log('Got local media stream for two-way video')
+    } catch (err) {
+      console.warn('Could not get local media for two-way video:', err)
+    }
+
+    room.on('trackSubscribed', (track, publication, participant) => {
+      console.log('Track subscribed:', track.kind, participant.identity, 'broadcasterId:', broadcasterId)
+      if (track.kind === Track.Kind.Video || track.kind === Track.Kind.Audio) {
+        const videoEls: HTMLVideoElement[] = []
+        
+        if (broadcasterId && viewingVideoRefs.current[broadcasterId]) {
+          console.log('Found viewingVideoRef for broadcaster:', broadcasterId)
+          videoEls.push(viewingVideoRefs.current[broadcasterId])
+        }
+        if (broadcasterVideoRefs.current[roomName]) {
+          console.log('Found broadcasterVideoRef for room:', roomName)
+          videoEls.push(broadcasterVideoRefs.current[roomName])
+        }
+        
+        if (videoEls.length > 0) {
+          console.log('Attaching track to', videoEls.length, 'video element(s)')
+          videoEls.forEach(el => track.attach(el))
+        } else {
+          console.log('No video element ready, storing pending track for:', broadcasterId || roomName)
+          const key = broadcasterId || roomName
+          if (!pendingTracksRef.current[key]) {
+            pendingTracksRef.current[key] = []
+          }
+          pendingTracksRef.current[key].push({ track, roomName })
+        }
+      }
+    })
+
+    room.on('trackUnsubscribed', (track, publication, participant) => {
+      console.log('Track unsubscribed:', track.kind, participant.identity)
+      track.detach()
+    })
+
+    try {
+      await room.connect(livekitUrl, token)
+      console.log('Connected to LiveKit room:', roomName)
+
+      if (localStream) {
+        const videoTrack = localStream.getVideoTracks()[0]
+        const audioTrack = localStream.getAudioTracks()[0]
+        console.log('Publishing viewer tracks - video:', !!videoTrack, 'audio:', !!audioTrack)
+        if (videoTrack) {
+          const pub = await room.localParticipant.publishTrack(videoTrack, { source: Track.Source.Camera })
+          console.log('Published viewer video track:', pub?.trackSid)
+        }
+        if (audioTrack) {
+          const pub = await room.localParticipant.publishTrack(audioTrack, { source: Track.Source.Microphone })
+          console.log('Published viewer audio track:', pub?.trackSid)
+        }
+      }
+
+      room.remoteParticipants.forEach(participant => {
+        participant.trackPublications.forEach(pub => {
+          if (pub.track && (pub.track.kind === Track.Kind.Video || pub.track.kind === Track.Kind.Audio)) {
+            console.log('Found existing track:', pub.track.kind, 'from', participant.identity)
+            const videoEls: HTMLVideoElement[] = []
+            
+            if (broadcasterId && viewingVideoRefs.current[broadcasterId]) {
+              console.log('Found viewingVideoRef for existing track:', broadcasterId)
+              videoEls.push(viewingVideoRefs.current[broadcasterId])
+            }
+            if (broadcasterVideoRefs.current[roomName]) {
+              console.log('Found broadcasterVideoRef for existing track:', roomName)
+              videoEls.push(broadcasterVideoRefs.current[roomName])
+            }
+            
+            if (videoEls.length > 0) {
+              console.log('Attaching existing track to', videoEls.length, 'video element(s)')
+              videoEls.forEach(el => pub.track!.attach(el))
+            } else {
+              console.log('No video element ready for existing track, storing pending')
+              const key = broadcasterId || roomName
+              if (!pendingTracksRef.current[key]) {
+                pendingTracksRef.current[key] = []
+              }
+              pendingTracksRef.current[key].push({ track: pub.track, roomName })
+            }
+          }
+        })
+      })
+
+    } catch (err) {
+      console.error('Failed to connect to LiveKit room:', err)
+      delete livekitRoomsRef.current[roomName]
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop())
+      }
+      setLocalViewerStream(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      Object.values(livekitRoomsRef.current).forEach(room => room.disconnect())
+      if (viewerStreamRef.current) {
+        viewerStreamRef.current.getTracks().forEach(t => t.stop())
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    Object.entries(viewingVideoEls).forEach(([broadcasterId, videoEl]) => {
+      const broadcast = viewingBroadcasts.find(b => b.broadcasterId === broadcasterId)
+      const keysToCheck = [broadcasterId, broadcast?.roomName].filter(Boolean) as string[]
+      keysToCheck.forEach(key => {
+        const pending = pendingTracksRef.current[key]
+        if (pending && pending.length > 0) {
+          pending.forEach(({ track }) => {
+            console.log('Attaching pending track (useEffect) to:', key)
+            track.attach(videoEl)
+          })
+          delete pendingTracksRef.current[key]
+        }
+      })
+    })
+  }, [viewingVideoEls, viewingBroadcasts])
+
+  // Connect to LiveKit when viewingBroadcasts changes and video elements are ready
+  useEffect(() => {
+    if (viewingBroadcasts.length === 0) return
+    
+    const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL
+    console.log('viewingBroadcasts changed:', viewingBroadcasts, 'livekitUrl:', livekitUrl)
+    if (!livekitUrl) {
+      console.error('NEXT_PUBLIC_LIVEKIT_URL not set!')
+      return
+    }
+    
+    viewingBroadcasts.forEach(broadcast => {
+      const token = livekitTokens[broadcast.roomName]
+      console.log('Checking broadcast:', broadcast.roomName, 'token:', token ? 'present' : 'missing', 'already connected:', !!livekitRoomsRef.current[broadcast.roomName])
+      if (!token || livekitRoomsRef.current[broadcast.roomName]) return
+      
+      // Set the ref for use in connectToBroadcaster
+      if (viewingVideoEls[broadcast.broadcasterId]) {
+        viewingVideoRefs.current[broadcast.broadcasterId] = viewingVideoEls[broadcast.broadcasterId]
+      }
+      
+      connectToBroadcaster(broadcast.roomName, token, livekitUrl, broadcast.broadcasterId)
+    })
+  }, [viewingBroadcasts, viewingVideoEls, livekitTokens, connectToBroadcaster])
+
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' })
     window.location.href = '/'
@@ -588,34 +948,246 @@ export default function ChatPage() {
       {/* Header */}
       <header className="h-14 bg-white border-b flex items-center justify-between px-4 shadow-sm shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center shrink-0">
             <span className="text-white text-sm">✨</span>
           </div>
-          <span className="font-semibold gradient-text">GirlyPopChat</span>
-          {connected && (
-            <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full">Connected</span>
+          <span className="font-bold gradient-text">GirlyPopChat</span>
+          {connected
+            ? <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full">Connected</span>
+            : <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">Connecting…</span>
+          }
+          {currentRoom && rooms.find(r => r.id === currentRoom) && (
+            <span className="text-sm text-gray-500 hidden sm:block">
+              #{rooms.find(r => r.id === currentRoom)?.name}
+            </span>
           )}
         </div>
 
-        <div className="flex items-center gap-3">
-          {isBroadcasting && (
-            <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
+          {isBroadcasting ? (
+            <>
               <span className="bg-red-500 text-white text-xs px-2 py-1 rounded-full animate-pulse">
-                LIVE • {viewerCount} viewers
+                LIVE • {viewerCount} {viewerCount === 1 ? 'viewer' : 'viewers'}
               </span>
-              <button
-                onClick={toggleLock}
-                className={`text-xs px-2 py-1 rounded ${isLocked ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'}`}
-              >
+              <button onClick={toggleLock} className={`text-xs px-2 py-1 rounded ${isLocked ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'}`}>
                 {isLocked ? '🔒 Locked' : '🔓 Open'}
               </button>
-            </div>
+              <button onClick={stopBroadcast} className="text-xs px-3 py-1.5 bg-red-500 text-white rounded-lg font-medium hover:bg-red-600">
+                Stop
+              </button>
+            </>
+          ) : (
+            <button onClick={startBroadcast} className="text-xs px-3 py-1.5 gradient-bg text-white rounded-lg font-medium hover:opacity-90">
+              Go Live
+            </button>
           )}
-          <button onClick={handleLogout} className="text-sm text-gray-600 hover:text-gray-900">
+          <div className="w-px h-5 bg-gray-200" />
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center text-white text-xs font-medium">
+              {user.username?.[0]?.toUpperCase() ?? '?'}
+            </div>
+            <span className="text-sm font-medium text-gray-700 hidden sm:block">{user.displayName || user.username}</span>
+          </div>
+          {isBroadcasting && (
+            <button
+              onClick={() => setShowViewers(!showViewers)}
+              className="p-1.5 text-gray-400 hover:text-pink-500 rounded hover:bg-gray-100"
+              title="Who's watching?"
+            >
+              <Eye className="w-4 h-4" />
+            </button>
+          )}
+          <a href="/settings" className="p-1.5 text-gray-400 hover:text-gray-700 rounded hover:bg-gray-100" title="Settings">
+            <Settings className="w-4 h-4" />
+          </a>
+          <button onClick={handleLogout} className="text-xs text-gray-400 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-100">
             Logout
           </button>
         </div>
       </header>
+
+      {/* Panic Button: Who's Watching */}
+      {showViewers && isBroadcasting && (
+        <div className="bg-pink-50 border-b border-pink-200 px-4 py-3 shrink-0">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-pink-700">
+              <Eye className="w-4 h-4 inline mr-1" />
+              {viewerCount} {viewerCount === 1 ? 'person' : 'people'} watching
+            </span>
+            <button onClick={() => setShowViewers(false)} className="text-pink-400 hover:text-pink-600">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          {viewerCount === 0 && (
+            <p className="text-xs text-pink-500">Nobody is watching right now.</p>
+          )}
+        </div>
+      )}
+
+      {/* Video Strip */}
+      {(isBroadcasting || activeBroadcasters.length > 0) && (
+        <div className="bg-gray-900 border-b border-gray-800 shrink-0">
+          <div className="flex gap-3 p-3 overflow-x-auto">
+            {/* Own camera */}
+            {isBroadcasting && (
+              <div className="relative shrink-0 w-44 h-32 rounded-xl overflow-hidden bg-gray-800 ring-2 ring-pink-500">
+                <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
+                  <div className="flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                    <span className="text-white text-xs font-medium truncate">{user.displayName || user.username}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Other broadcasters */}
+            {activeBroadcasters.filter(b => b.broadcasterId !== user.id).map(b => {
+              const roomName = b.roomName
+              const hasToken = roomName && livekitTokens[roomName]
+              const isConnected = roomName && livekitRoomsRef.current[roomName]
+              const isViewing = viewingBroadcasts.some(vb => vb.broadcasterId === b.broadcasterId)
+              return (
+                <div 
+                  key={b.broadcasterId} 
+                  className={`relative shrink-0 w-44 h-32 rounded-xl overflow-hidden bg-gray-800 cursor-pointer hover:ring-2 hover:ring-pink-400 ${isViewing ? 'ring-2 ring-green-500' : ''}`}
+                  onClick={() => {
+                    if (!isViewing && roomName && b.broadcasterId) {
+                      if (!hasToken) {
+                        requestView(b.broadcasterId, roomName, b.isLocked || false)
+                      }
+                      setViewingBroadcasts(prev => [...prev, { broadcasterId: b.broadcasterId, username: b.displayName || b.username || '', roomName }])
+                    }
+                  }}
+                >
+                  <video 
+                    ref={el => { 
+                      if (el) {
+                        broadcasterVideoRefs.current[roomName!] = el
+                        // Check both broadcasterId and roomName keys for pending tracks
+                        const keysToCheck = [b.broadcasterId!, roomName!].filter(Boolean)
+                        keysToCheck.forEach(key => {
+                          const pending = pendingTracksRef.current[key]
+                          if (pending && pending.length > 0) {
+                            pending.forEach(({ track }) => {
+                              console.log('Attaching pending track to strip:', key)
+                              track.attach(el)
+                            })
+                            delete pendingTracksRef.current[key]
+                          }
+                        })
+                      }
+                    }}
+                    autoPlay 
+                    muted
+                    playsInline 
+                    className="w-full h-full object-cover"
+                  />
+                  {!isConnected && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
+                      <div className="w-14 h-14 rounded-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center text-white text-xl font-bold">
+                        {(b.displayName || b.username)?.[0]?.toUpperCase() ?? '?'}
+                      </div>
+                    </div>
+                  )}
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
+                    <div className="flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                      <span className="text-white text-xs font-medium truncate">{b.displayName || b.username}</span>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Viewing Broadcasts Grid */}
+      {viewingBroadcasts.length > 0 && (
+        <div className="bg-gray-900 border-b border-gray-800 p-3 shrink-0">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-white text-sm font-medium">Video Chat ({viewingBroadcasts.length + 1} participants)</span>
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-2">
+            {/* Your own video */}
+            <div className="relative shrink-0 w-48">
+              <div className="relative w-full aspect-video bg-gray-800 rounded-lg overflow-hidden ring-2 ring-pink-500">
+                <video 
+                  ref={viewerVideoRef}
+                  autoPlay 
+                  muted
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
+                {!localViewerStream && (
+                  <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-xs">
+                    Starting camera...
+                  </div>
+                )}
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
+                  <span className="text-white text-xs truncate">You</span>
+                </div>
+              </div>
+            </div>
+            {/* Remote broadcasts */}
+            {viewingBroadcasts.map(broadcast => (
+              <div key={broadcast.broadcasterId} className="relative shrink-0 w-48">
+                <div className="relative w-full aspect-video bg-gray-800 rounded-lg overflow-hidden">
+                  <video 
+                    ref={(el) => {
+                      if (el) {
+                        viewingVideoRefs.current[broadcast.broadcasterId] = el
+                        setViewingVideoEls(prev => ({ ...prev, [broadcast.broadcasterId]: el }))
+                        // Check both broadcasterId and roomName keys for pending tracks
+                        const keysToCheck = [broadcast.broadcasterId, broadcast.roomName].filter(Boolean)
+                        keysToCheck.forEach(key => {
+                          const pending = pendingTracksRef.current[key]
+                          if (pending && pending.length > 0) {
+                            pending.forEach(({ track }) => {
+                              console.log('Attaching pending track to grid:', key)
+                              track.attach(el)
+                            })
+                            delete pendingTracksRef.current[key]
+                          }
+                        })
+                      }
+                    }}
+                    autoPlay 
+                    muted
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                  {!livekitRoomsRef.current[broadcast.roomName] && (
+                    <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-xs">
+                      Connecting...
+                    </div>
+                  )}
+                  <button 
+                    onClick={() => {
+                      const remaining = viewingBroadcasts.filter(b => b.broadcasterId !== broadcast.broadcasterId)
+                      setViewingBroadcasts(remaining)
+                      if (viewingVideoRefs.current[broadcast.broadcasterId]) {
+                        viewingVideoRefs.current[broadcast.broadcasterId].srcObject = null
+                      }
+                      if (remaining.length === 0 && viewerStreamRef.current) {
+                        viewerStreamRef.current.getTracks().forEach(t => t.stop())
+                        viewerStreamRef.current = null
+                        setLocalViewerStream(null)
+                      }
+                    }}
+                    className="absolute top-1 right-1 w-6 h-6 bg-black/50 rounded-full flex items-center justify-center text-white text-xs hover:bg-black/70"
+                  >
+                    ✕
+                  </button>
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
+                    <span className="text-white text-xs truncate">{broadcast.username}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Main */}
       <div className="flex-1 flex overflow-hidden">
@@ -643,7 +1215,18 @@ export default function ChatPage() {
               }`}
             >
               <User className="w-3 h-3" />
-              Users ({users.length})
+              Users
+            </button>
+            <button
+              onClick={() => setSidebarTab('dms')}
+              className={`flex-1 py-1.5 text-xs font-medium rounded flex items-center justify-center gap-1 ${
+                sidebarTab === 'dms'
+                  ? 'bg-pink-100 text-pink-700'
+                  : 'text-gray-500 hover:bg-gray-100'
+              }`}
+            >
+              <MessageSquare className="w-3 h-3" />
+              DMs
             </button>
             <button
               onClick={() => setShowCreateRoom(true)}
@@ -656,7 +1239,9 @@ export default function ChatPage() {
 
           {/* Content */}
           <div className="flex-1 overflow-auto">
-            {sidebarTab === 'rooms' ? (
+            {sidebarTab === 'dms' ? (
+              <DmPanel currentUserId={user.id} socket={socketRef.current} />
+            ) : sidebarTab === 'rooms' ? (
               <div className="p-2 space-y-1">
                 {/* Active Rooms */}
                 {rooms.map(room => (
@@ -673,7 +1258,14 @@ export default function ChatPage() {
                       <span className="text-lg">{room.icon || '💬'}</span>
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-sm truncate">{room.displayName}</div>
-                        <div className="text-xs text-gray-400">@{room.name}</div>
+                        <div className="flex items-center gap-1 text-xs text-gray-400">
+                          <span>@{room.name}</span>
+                          {room.roomType && room.roomType !== 'text' && (
+                            <span className="bg-gray-100 px-1 rounded">{ROOM_TYPES.find(t => t.value === room.roomType)?.emoji}</span>
+                          )}
+                          {room.accessMode === 'secret' && <span>🤫</span>}
+                          {room.accessMode === 'password' && <span>🔑</span>}
+                        </div>
                       </div>
                       {room.isNSFW && <span className="text-xs">🔞</span>}
                     </div>
@@ -729,13 +1321,25 @@ export default function ChatPage() {
             ) : (
               <div className="p-2">
                 {users.map(u => (
-                  <div key={u.userId} className="flex items-center gap-2 p-2 rounded hover:bg-gray-50">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center text-white text-xs">
-                      {u.username[0].toUpperCase()}
+                  <button
+                    key={u.userId}
+                    onClick={(e) => {
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                      setProfileCard({ userId: u.userId, username: u.username, displayName: u.displayName, avatar: u.avatar, x: rect.right + 8, y: rect.top })
+                    }}
+                    className="w-full flex items-center gap-2 p-2 rounded hover:bg-gray-50 text-left"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center text-white text-xs shrink-0">
+                      {u.username?.[0]?.toUpperCase() ?? '?'}
                     </div>
                     <span className="text-sm truncate">{u.displayName || u.username}</span>
-                    {u.cam > 0 && <span className="w-2 h-2 bg-green-500 rounded-full" />}
-                  </div>
+                    {activeBroadcasters.some(b => b.broadcasterId === u.userId)
+                      ? <span className="w-2.5 h-2.5 bg-red-500 rounded-full shrink-0 animate-pulse" title="LIVE" />
+                      : u.cam > 0
+                        ? <span className="w-2.5 h-2.5 bg-yellow-400 rounded-full shrink-0" title="READY" />
+                        : <span className="w-2.5 h-2.5 bg-gray-300 rounded-full shrink-0" title="PRESENT" />
+                    }
+                  </button>
                 ))}
               </div>
             )}
@@ -767,24 +1371,6 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Broadcast Controls */}
-          <div className="p-3 border-t">
-            {isBroadcasting ? (
-              <button
-                onClick={stopBroadcast}
-                className="w-full py-2 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600"
-              >
-                Stop Broadcast
-              </button>
-            ) : (
-              <button
-                onClick={startBroadcast}
-                className="w-full py-2 gradient-bg text-white rounded-lg text-sm font-medium hover:opacity-90"
-              >
-                Go Live
-              </button>
-            )}
-          </div>
         </aside>
 
         {/* Chat */}
@@ -801,6 +1387,10 @@ export default function ChatPage() {
                 onReply={() => startReplying(msg)}
                 onReaction={(emoji) => addReaction(msg._id, emoji)}
                 onImageClick={setPreviewImage}
+                onUserClick={(e, userId, username, displayName) => {
+                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                  setProfileCard({ userId, username, displayName, x: rect.left, y: rect.bottom + 4 })
+                }}
                 activeMenu={activeMenu}
                 setActiveMenu={setActiveMenu}
                 activeEmojiPicker={activeEmojiPicker}
@@ -878,30 +1468,7 @@ export default function ChatPage() {
           </form>
         </main>
 
-        {/* Video Panel */}
-        <aside className="w-80 bg-gray-900 flex flex-col shrink-0">
-          {isBroadcasting && livekitToken ? (
-            <LiveKitRoom
-              token={livekitToken}
-              serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL || ''}
-              connect={true}
-              video={true}
-              audio={true}
-              className="flex-1"
-            >
-              <VideoConference />
-            </LiveKitRoom>
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-white text-center">
-              <div>
-                <div className="w-20 h-20 mx-auto mb-3 rounded-full bg-white/5 flex items-center justify-center">
-                  <span className="text-3xl opacity-30">📹</span>
-                </div>
-                <p className="text-sm text-gray-500">Click "Go Live" to start</p>
-              </div>
-            </div>
-          )}
-        </aside>
+
       </div>
 
       {/* Image Preview Modal */}
@@ -1006,6 +1573,66 @@ export default function ChatPage() {
                   className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-pink-500 outline-none"
                 />
               </div>
+
+              {/* Room Type */}
+              <div>
+                <label className="text-sm text-gray-600 mb-1 block">Room Type</label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {ROOM_TYPES.map(rt => (
+                    <button
+                      key={rt.value}
+                      onClick={() => setNewRoomType(rt.value)}
+                      className={'p-2 rounded-lg text-left text-xs transition-colors ' +
+                        (newRoomType === rt.value
+                          ? 'bg-pink-100 border-2 border-pink-400'
+                          : 'bg-gray-50 border border-gray-200 hover:bg-gray-100')}
+                    >
+                      <span className="text-base">{rt.emoji}</span> <span className="font-medium">{rt.label}</span>
+                      <div className="text-gray-400 mt-0.5">{rt.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Access Mode */}
+              <div>
+                <label className="text-sm text-gray-600 mb-1 block">Access</label>
+                <div className="flex gap-2">
+                  {ACCESS_MODES.map(am => (
+                    <button
+                      key={am.value}
+                      onClick={() => setNewAccessMode(am.value)}
+                      className={'flex-1 p-2 rounded-lg text-center text-xs transition-colors ' +
+                        (newAccessMode === am.value
+                          ? 'bg-pink-100 border-2 border-pink-400'
+                          : 'bg-gray-50 border border-gray-200 hover:bg-gray-100')}
+                    >
+                      <div className="text-base">{am.emoji}</div>
+                      <div className="font-medium">{am.label}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Vibe Preset */}
+              <div>
+                <label className="text-sm text-gray-600 mb-1 block">Vibe</label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {VIBE_PRESETS.map(vp => (
+                    <button
+                      key={vp.value}
+                      onClick={() => setNewVibePreset(vp.value)}
+                      className={'p-2 rounded-lg text-left text-xs transition-colors ' +
+                        (newVibePreset === vp.value
+                          ? 'bg-pink-100 border-2 border-pink-400'
+                          : 'bg-gray-50 border border-gray-200 hover:bg-gray-100')}
+                    >
+                      <span className="text-base">{vp.emoji}</span> <span className="font-medium">{vp.label}</span>
+                      <div className="text-gray-400 mt-0.5">{vp.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
             <button
@@ -1017,6 +1644,43 @@ export default function ChatPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* User Profile Card Popover */}
+      {profileCard && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setProfileCard(null)} />
+          <div
+            className="fixed z-50"
+            style={{ left: Math.min(profileCard.x, window.innerWidth - 300), top: Math.min(profileCard.y, window.innerHeight - 320) }}
+          >
+            <UserProfileCard
+              userId={profileCard.userId}
+              username={profileCard.username}
+              displayName={profileCard.displayName}
+              avatar={profileCard.avatar}
+              currentUserId={user.id}
+              onClose={() => setProfileCard(null)}
+              onStartDm={() => {
+                setProfileCard(null)
+                setSidebarTab('dms')
+              }}
+              isLive={activeBroadcasters.some(b => b.broadcasterId === profileCard.userId)}
+              roomName={activeBroadcasters.find(b => b.broadcasterId === profileCard.userId)?.roomName}
+              onViewCam={(userId, roomName) => {
+                const broadcaster = activeBroadcasters.find(b => b.broadcasterId === userId)
+                if (!viewingBroadcasts.find(b => b.broadcasterId === userId)) {
+                  setViewingBroadcasts(prev => [...prev, { broadcasterId: userId, username: broadcaster?.username || '', roomName: roomName || '' }])
+                }
+                socketRef.current?.emit('viewRequest', { broadcasterId: userId }, (res: { success: boolean; approved?: boolean; token?: string; roomName?: string; livekitUrl?: string; message?: string }) => {
+                  if (res.success && res.approved && res.token && res.roomName) {
+                    setLivekitTokens(prev => ({ ...prev, [res.roomName!]: res.token! }))
+                  }
+                })
+              }}
+            />
+          </div>
+        </>
       )}
     </div>
   )
@@ -1035,6 +1699,7 @@ interface MessageProps {
   onReply: () => void
   onReaction: (emoji: string) => void
   onImageClick: (url: string) => void
+  onUserClick: (e: React.MouseEvent, userId: string, username: string, displayName?: string) => void
   activeMenu: string | null
   setActiveMenu: (id: string | null) => void
   activeEmojiPicker: string | null
@@ -1050,6 +1715,7 @@ function MessageComponent({
   onReply,
   onReaction,
   onImageClick,
+  onUserClick,
   activeMenu,
   setActiveMenu,
   activeEmojiPicker,
@@ -1075,14 +1741,19 @@ function MessageComponent({
     <div className={`group flex gap-2 ${isOwn ? '' : ''}`}>
       {/* Avatar */}
       <div className="w-8 h-8 rounded-full bg-gradient-to-br from-pink-400 to-purple-500 flex items-center justify-center text-white text-xs shrink-0">
-        {message.name[0]?.toUpperCase()}
+        {message.name?.[0]?.toUpperCase() ?? '?'}
       </div>
 
       {/* Content */}
       <div className="flex-1 min-w-0">
         {/* Header */}
         <div className="flex items-center gap-2">
-          <span className="font-medium text-sm">{message.displayName || message.name}</span>
+          <button
+            onClick={(e) => onUserClick(e, message.userId, message.name, message.displayName)}
+            className="font-medium text-sm hover:underline"
+          >
+            {message.displayName || message.name}
+          </button>
           {message.badge && (
             <span className="text-xs px-1.5 py-0.5 bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded">
               {message.badge}

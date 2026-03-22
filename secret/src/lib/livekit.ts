@@ -45,7 +45,7 @@ export async function generateLiveKitToken(options: TokenOptions): Promise<strin
   
   token.addGrant(grants)
   
-  return token.toJwt()
+  return await token.toJwt()
 }
 
 // ============================================
@@ -82,6 +82,21 @@ export async function generateViewerToken(
     participantIdentity: `viewer-${userId}`,
     isPublisher: false,
     isSubscriber: true,
+  })
+}
+
+export async function generateTwoWayToken(
+  roomName: string,
+  userId: string,
+  username: string
+): Promise<string> {
+  return generateLiveKitToken({
+    roomName,
+    participantName: username,
+    participantIdentity: `participant-${userId}`,
+    isPublisher: true,
+    isSubscriber: true,
+    canPublishData: true,
   })
 }
 

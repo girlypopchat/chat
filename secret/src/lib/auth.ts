@@ -28,9 +28,8 @@ export type OAuthProvider = keyof typeof OAUTH_PROVIDERS
 export async function startOAuth(provider: OAuthProvider) {
   const redirectUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback`
   
-  const response = await // @ts-ignore - provider-based OAuth start
-    stytch.oauth[provider as any].start({
-    provider: OAUTH_PROVIDERS[provider],
+  // @ts-ignore - provider-based OAuth start
+  const response = await stytch.oauth[provider as any].start({
     login_redirect_url: redirectUrl,
     signup_redirect_url: redirectUrl,
   })
@@ -78,7 +77,7 @@ export async function validateSession(sessionToken: string) {
     return {
       valid: true,
       user: response.user,
-      session: (response as any).session,
+      session: response.session,
     }
   } catch {
     return { valid: false }
@@ -102,32 +101,55 @@ export async function revokeSession(sessionToken: string) {
 // Get or Create User from Stytch
 // ============================================
 
-export async function getOrCreateUser(stytchUser: any) {
-  // Find existing user
+let _regOpenCache: { value: boolean; ts: number } | null = null
+
+async function isRegistrationOpen(): Promise<boolean> {
+  if (_regOpenCache && Date.now() - _regOpenCache.ts < 30_000) return _regOpenCache.value
+  try {
+    const config = await db.appConfig.findUnique({ where: { key: 'registrationOpen' } })
+    const value = config?.value === 'true'
+    _regOpenCache = { value, ts: Date.now() }
+    return value
+  } catch {
+    return false
+  }
+}
+
+export async function getOrCreateUser(stytchUser: any, inviteCode?: string | null) {
   let user = await db.user.findUnique({
     where: { stytchId: stytchUser.user_id },
   })
   
   if (user) {
-    // Update last online
     await db.user.update({
       where: { id: user.id },
       data: { lastOnlineAt: new Date() },
     })
-    return user
+    return { user, isNew: false }
+  }
+
+  // New user - check invite code before checking REGISTRATION_OPEN
+  const email = stytchUser.emails?.[0]?.email
+  
+  if (inviteCode) {
+    const invite = await db.inviteCode.findUnique({
+      where: { code: inviteCode },
+    })
+    
+    if (!invite || invite.usedAt || (invite.expiresAt && invite.expiresAt < new Date())) {
+      throw new Error('INVALID_INVITE')
+    }
+  } else if (!await isRegistrationOpen()) {
+    throw new Error('REGISTRATION_CLOSED')
   }
   
-  // Generate username from email or oauth
-  const email = stytchUser.emails?.[0]?.email
   let username = email?.split('@')[0] || `user_${stytchUser.user_id.slice(0, 8)}`
   
-  // Ensure unique username
   const existing = await db.user.findUnique({ where: { username } })
   if (existing) {
     username = `${username}_${Date.now().toString(36)}`
   }
   
-  // Create new user
   user = await db.user.create({
     data: {
       stytchId: stytchUser.user_id,
@@ -139,5 +161,16 @@ export async function getOrCreateUser(stytchUser: any) {
     },
   })
   
-  return user
+  if (inviteCode) {
+    await db.inviteCode.update({
+      where: { code: inviteCode },
+      data: {
+        usedById: user.id,
+        usedAt: new Date(),
+        useCount: { increment: 1 },
+      },
+    })
+  }
+  
+  return { user, isNew: true, email }
 }

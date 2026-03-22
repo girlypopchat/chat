@@ -1,0 +1,130 @@
+export interface LastNameOption {
+  name: string
+  emoji: string
+}
+
+export const LAST_NAMES: LastNameOption[] = [
+  // Nature
+  { name: 'Petal', emoji: '🌸' },
+  { name: 'Blossom', emoji: '🌺' },
+  { name: 'Bloom', emoji: '🌷' },
+  { name: 'Daisy', emoji: '🌼' },
+  { name: 'Rose', emoji: '🌹' },
+  { name: 'Lily', emoji: '🪷' },
+  { name: 'Ivy', emoji: '🌿' },
+  { name: 'Fern', emoji: '🌿' },
+  { name: 'Willow', emoji: '🌳' },
+  { name: 'Clover', emoji: '🍀' },
+  { name: 'Meadow', emoji: '🌾' },
+  { name: 'Sage', emoji: '🌱' },
+  { name: 'Juniper', emoji: '🌲' },
+  { name: 'Maple', emoji: '🍁' },
+  { name: 'Jasmine', emoji: '🤍' },
+  { name: 'Violet', emoji: '💜' },
+  { name: 'Poppy', emoji: '🌺' },
+  { name: 'Laurel', emoji: '🌿' },
+
+  // Celestial
+  { name: 'Starlight', emoji: '✨' },
+  { name: 'Moonbeam', emoji: '🌙' },
+  { name: 'Stardust', emoji: '💫' },
+  { name: 'Eclipse', emoji: '🌑' },
+  { name: 'Nova', emoji: '⭐' },
+  { name: 'Comet', emoji: '☄️' },
+  { name: 'Aurora', emoji: '🌌' },
+  { name: 'Twilight', emoji: '🌅' },
+  { name: 'Solstice', emoji: '☀️' },
+  { name: 'Nebula', emoji: '🌀' },
+  { name: 'Celestia', emoji: '🔮' },
+  { name: 'Cosmos', emoji: '🪐' },
+
+  // Sweet / Food
+  { name: 'Mochi', emoji: '🍡' },
+  { name: 'Honey', emoji: '🍯' },
+  { name: 'Sugar', emoji: '🧁' },
+  { name: 'Cherry', emoji: '🍒' },
+  { name: 'Peach', emoji: '🍑' },
+  { name: 'Latte', emoji: '☕' },
+  { name: 'Cookie', emoji: '🍪' },
+  { name: 'Caramel', emoji: '🍬' },
+  { name: 'Berry', emoji: '🫐' },
+  { name: 'Matcha', emoji: '🍵' },
+  { name: 'Strawberry', emoji: '🍓' },
+  { name: 'Macaron', emoji: '🧁' },
+  { name: 'Boba', emoji: '🧋' },
+  { name: 'Truffle', emoji: '🍫' },
+
+  // Ethereal / Magical
+  { name: 'Whisper', emoji: '🤫' },
+  { name: 'Dream', emoji: '💭' },
+  { name: 'Phantom', emoji: '👻' },
+  { name: 'Mystic', emoji: '🔮' },
+  { name: 'Charm', emoji: '🪄' },
+  { name: 'Spell', emoji: '✨' },
+  { name: 'Glimmer', emoji: '💎' },
+  { name: 'Shimmer', emoji: '🪩' },
+  { name: 'Spark', emoji: '⚡' },
+  { name: 'Haze', emoji: '🌫️' },
+  { name: 'Mirage', emoji: '🏜️' },
+  { name: 'Pixie', emoji: '🧚' },
+  { name: 'Fairy', emoji: '🧚' },
+  { name: 'Spirit', emoji: '🕊️' },
+  { name: 'Aura', emoji: '🫧' },
+
+  // Elements / Weather
+  { name: 'Rain', emoji: '🌧️' },
+  { name: 'Storm', emoji: '⛈️' },
+  { name: 'Frost', emoji: '❄️' },
+  { name: 'Snow', emoji: '🌨️' },
+  { name: 'Breeze', emoji: '🌬️' },
+  { name: 'Cloud', emoji: '☁️' },
+  { name: 'Ember', emoji: '🔥' },
+  { name: 'Flame', emoji: '🔥' },
+  { name: 'Crystal', emoji: '💎' },
+  { name: 'Pearl', emoji: '🦪' },
+  { name: 'Opal', emoji: '💠' },
+  { name: 'Jade', emoji: '💚' },
+  { name: 'Coral', emoji: '🪸' },
+  { name: 'Ocean', emoji: '🌊' },
+  { name: 'Tide', emoji: '🌊' },
+  { name: 'Dew', emoji: '💧' },
+
+  // Creatures / Animals
+  { name: 'Dove', emoji: '🕊️' },
+  { name: 'Fox', emoji: '🦊' },
+  { name: 'Bunny', emoji: '🐰' },
+  { name: 'Kitty', emoji: '🐱' },
+  { name: 'Moth', emoji: '🦋' },
+  { name: 'Butterfly', emoji: '🦋' },
+  { name: 'Firefly', emoji: '✨' },
+  { name: 'Swan', emoji: '🦢' },
+  { name: 'Robin', emoji: '🐦' },
+  { name: 'Starling', emoji: '🐦‍⬛' },
+  { name: 'Fawn', emoji: '🦌' },
+
+  // Aesthetic / Vibes
+  { name: 'Velvet', emoji: '🎀' },
+  { name: 'Silk', emoji: '🧵' },
+  { name: 'Lace', emoji: '🪡' },
+  { name: 'Ribbon', emoji: '🎀' },
+  { name: 'Blush', emoji: '🩷' },
+  { name: 'Dusk', emoji: '🌆' },
+  { name: 'Dawn', emoji: '🌅' },
+  { name: 'Lullaby', emoji: '🎶' },
+  { name: 'Melody', emoji: '🎵' },
+  { name: 'Echo', emoji: '🔊' },
+  { name: 'Reverie', emoji: '💫' },
+  { name: 'Serenity', emoji: '🕊️' },
+  { name: 'Solace', emoji: '🤍' },
+  { name: 'Haven', emoji: '🏡' },
+  { name: 'Harbor', emoji: '⚓' },
+  { name: 'Cove', emoji: '🏖️' },
+]
+
+export const GENDER_ICONS = [
+  { icon: '🌸', label: 'Feminine' },
+  { icon: '🌿', label: 'Nonbinary' },
+  { icon: '🚹', label: 'Masculine' },
+] as const
+
+export type GenderIcon = typeof GENDER_ICONS[number]['icon']

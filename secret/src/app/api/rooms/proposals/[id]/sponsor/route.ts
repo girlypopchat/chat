@@ -64,6 +64,13 @@ export async function POST(
 
     // Check if we have enough sponsors
     if (newSponsorCount >= REQUIRED_SPONSORS) {
+      // Collect all sponsor user IDs as guardians
+      const allSponsors = await db.roomProposalSponsor.findMany({
+        where: { proposalId },
+        select: { userId: true },
+      })
+      const guardianIds = allSponsors.map(s => s.userId)
+
       // Create the room!
       const newRoom = await db.room.create({
         data: {
@@ -71,9 +78,13 @@ export async function POST(
           displayName: proposal.displayName,
           description: proposal.description,
           icon: proposal.icon,
+          roomType: proposal.roomType,
+          accessMode: proposal.accessMode,
+          vibePreset: proposal.vibePreset,
           isNSFW: proposal.isNSFW,
           ownerId: proposal.createdById,
-          isPublic: true,
+          isPublic: proposal.accessMode !== 'secret',
+          guardians: JSON.stringify(guardianIds),
         }
       })
 

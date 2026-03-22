@@ -1,4 +1,17 @@
+// Imgur Image Upload API
+// Handles clipboard image paste → Imgur upload → URL return
+
 import { NextRequest, NextResponse } from 'next/server'
+
+interface ImgurResponse {
+  data: {
+    link: string
+    deletehash: string
+    id: string
+  }
+  success: boolean
+  status: number
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -9,8 +22,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No image provided' }, { status: 400 })
     }
 
-    const apiKey = process.env.IMGBB_API_KEY
-    if (!apiKey) {
+    // Get Imgur client ID from env
+    const clientId = process.env.IMGUR_CLIENT_ID
+    if (!clientId) {
+      // Fallback: return placeholder for development
+      console.warn('IMGUR_CLIENT_ID not set, using placeholder')
       return NextResponse.json({
         success: true,
         link: `https://placehold.co/800x600/1a1a2e/ffffff?text=Image+Upload`,
@@ -18,28 +34,34 @@ export async function POST(request: NextRequest) {
       })
     }
 
+    // Upload to Imgur
     const formData = new FormData()
     formData.append('image', image)
+    formData.append('type', type)
 
-    const response = await fetch(`https://api.imgbb.com/1/upload?key=${apiKey}`, {
+    const response = await fetch('https://api.imgur.com/3/image', {
       method: 'POST',
+      headers: {
+        Authorization: `Client-ID ${clientId}`,
+      },
       body: formData,
     })
 
-    const result = await response.json()
+    const result: ImgurResponse = await response.json()
 
     if (!result.success) {
-      console.error('ImgBB upload failed:', result)
+      console.error('Imgur upload failed:', result)
       return NextResponse.json({ error: 'Upload failed' }, { status: 500 })
     }
 
     return NextResponse.json({
       success: true,
-      link: result.data.url,
+      link: result.data.link,
+      deleteHash: result.data.deletehash,
       id: result.data.id,
     })
   } catch (error) {
-    console.error('ImgBB upload error:', error)
+    console.error('Imgur upload error:', error)
     return NextResponse.json({ error: 'Upload failed' }, { status: 500 })
   }
 }
