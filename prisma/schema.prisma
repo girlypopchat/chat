@@ -1,3 +1,6 @@
+// GirlyPopChat Database Schema
+// Stack: Stytch (Auth) + k-ID/AgeKey (Age) + Jitsi (Video) + Socket.IO (Realtime)
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,32 +10,415 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model WaitlistEntry {
+// ============================================
+// USER - Stytch handles auth, we store minimal data
+// ============================================
+
+model User {
+  id            String   @id @default(cuid())
+  stytchId      String   @unique  // Stytch user ID
+  
+  // Profile
+  username      String   @unique
+  displayName   String?
+  avatar        String?
+  bio           String?
+  gender        String?  // male, female, couple, other
+  
+  // Identity System
+  firstName       String?
+  lastName        String?   // From curated word list
+  lastNameEmoji   String?   // Matching emoji for last name
+  genderIcon      String?   // 🌸 Feminine, 🌿 Nonbinary, 🚹 Masculine
+  identitySetup   Boolean  @default(false)
+  displayMode     String   @default("full") // full, first_only, first_emoji, first_last
+  
+  // Privacy & Camera
+  privacyMode     String   @default("open")    // open, private, invisible
+  allowDmsFrom    String   @default("moots")    // anyone, moots, besties, nobody
+  showOnlineStatus Boolean @default(true)
+  cameraWhitelist String?  // JSON array of user IDs
+  cameraBlacklist String?  // JSON array of user IDs
+  
+  // Age Verification (k-ID/AgeKey)
+  ageVerified   Boolean  @default(false)
+  ageVerifiedAt DateTime?
+  ageKeyToken   String?  @unique  // Reusable AgeKey reference
+  ageThreshold  Int?     // Verified age threshold (18, 21, etc.)
+  
+  // Trust & Moderation
+  role          String   @default("member") // member, trusted, moderator, admin
+  trustScore    Int      @default(0)        // 0-100
+  strikes       Strike[]
+  isBanned      Boolean  @default(false)
+  bannedAt      DateTime?
+  bannedReason  String?
+  
+  // Invite System
+  inviteCodeUsed String?
+  invitedById    String?
+  inviter        User?    @relation("InviteTree", fields: [invitedById], references: [id])
+  invitedUsers   User[]   @relation("InviteTree")
+  inviteCodes    InviteCode[]
+  
+  // Email System
+  emailLogs      EmailLog[]
+  emailPreference EmailPreference?
+  
+  // Stats
+  messagesCount  Int      @default(0)
+  broadcastTime  Int      @default(0) // Total minutes
+  joinedAt       DateTime @default(now())
+  lastOnlineAt   DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  messages       Message[]
+  ownedRooms     Room[]   @relation("RoomOwner")
+  broadcasts     Broadcast[]
+  shadowblocksGiven  Shadowblock[] @relation("Blocker")
+  shadowblocksReceived Shadowblock[] @relation("Blocked")
+  sessions       Session[]
+  createdProposals   RoomProposal[] @relation("ProposalCreator")
+  sponsoredProposals RoomProposalSponsor[]
+  following      Follow[] @relation("Following")
+  followers      Follow[] @relation("Followers")
+  dmConversationsA DirectConversation[] @relation("ConvUserA")
+  dmConversationsB DirectConversation[] @relation("ConvUserB")
+  directMessages   DirectMessage[]
+  
+  @@index([stytchId])
+  @@index([username])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stytchSession String  @unique  // Stytch session token
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  
+  @@index([stytchSession])
+}
+
+// ============================================
+// INVITE SYSTEM
+// ============================================
+
+model InviteCode {
   id            String    @id @default(cuid())
-  email         String    @unique
+  code          String    @unique
+  createdById   String?
+  createdBy     User?     @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  usedById      String?
+  usedAt        DateTime?
+  maxUses       Int       @default(1)
+  useCount      Int       @default(0)
+  expiresAt     DateTime?
+  trustBonus    Int       @default(0)
+  createdAt     DateTime  @default(now())
   
-  // Referral tracking
-  referralCode  String    @unique
-  referredBy    String?
-  referralCount Int       @default(0)
+  @@index([code])
+}
+
+// ============================================
+// ROOM PROPOSALS (Quorum System)
+// ============================================
+
+model RoomProposal {
+  id            String    @id @default(cuid())
+  name          String    @unique
+  displayName   String
+  description   String?
+  icon          String?
   
-  // Priority scoring
-  priority      Int       @default(0)
+  // Creator
+  createdById   String
+  createdBy     User      @relation("ProposalCreator", fields: [createdById], references: [id])
+  
+  // Sponsors (need 5 total to create room)
+  sponsors      RoomProposalSponsor[]
+  sponsorCount  Int       @default(1)  // Creator is first sponsor
+  
+  // Settings
+  roomType      String    @default("text")
+  accessMode    String    @default("public")
+  vibePreset    String    @default("cozy")
+  isNSFW        Boolean   @default(false)
   
   // Status
-  status        String    @default("waiting") // waiting, invited, registered
-  invitedAt     DateTime?
+  status        String    @default("pending") // pending, approved, rejected, expired
+  expiresAt     DateTime?  // 24 hours from creation
   
-  // Metadata
-  ipAddress     String?
-  userAgent     String?
-  source        String?
+  // Result (when approved)
+  createdRoomId String?
   
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   
-  @@index([email])
-  @@index([referralCode])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+model RoomProposalSponsor {
+  id          String   @id @default(cuid())
+  proposalId  String
+  proposal    RoomProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  
+  @@unique([proposalId, userId])  // One sponsor per proposal per user
+  @@index([proposalId])
+  @@index([userId])
+}
+
+// ============================================
+// ROOMS & CHAT
+// ============================================
+
+model Room {
+  id            String    @id @default(cuid())
+  name          String    @unique
+  displayName   String
+  description   String?
+  icon          String?
+  
+  ownerId       String
+  owner         User      @relation("RoomOwner", fields: [ownerId], references: [id])
+  
+  // Room type: text, video, music, cinema, event, rave, library
+  roomType      String    @default("text")
+  
+  // Access mode: public, password, secret (invite-only)
+  accessMode    String    @default("public")
+  isPublic      Boolean   @default(true)
+  isNSFW        Boolean   @default(false)
+  password      String?
+  maxUsers      Int       @default(50)
+  
+  // Vibe preset: cozy, party, focus, sleepover
+  vibePreset    String    @default("cozy")
+  
+  // Guardians (JSON array of user IDs - the 5 creators)
+  guardians     String?   // JSON array of user IDs
+  
+  allowBroadcast Boolean  @default(true)
+  allowImages   Boolean   @default(true)
+  
+  memberCount   Int       @default(0)
+  messageCount  Int       @default(0)
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  messages      Message[]
+  broadcasts    Broadcast[]
+  
+  @@index([name])
+  @@index([isPublic])
+  @@index([roomType])
+}
+
+model Message {
+  id            String    @id @default(cuid())
+  content       String
+  type          String    @default("text") // text, system, emote, image, gif
+  
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roomId        String
+  room          Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  
+  replyToId     String?
+  isEdited      Boolean   @default(false)
+  editedAt      DateTime?
+  isDeleted     Boolean   @default(false)
+  deletedAt     DateTime?
+  
+  reactions     String?   // JSON
+  imageUrl      String?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@index([roomId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ============================================
+// BROADCAST (Jitsi)
+// ============================================
+
+model Broadcast {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  roomId        String
+  room          Room      @relation(fields: [roomId], references: [id])
+  
+  // Jitsi
+  jitsiRoom     String?   @unique
+  
+  // Status
+  isActive      Boolean   @default(true)
+  viewerCount   Int       @default(0)
+  
+  // Settings
+  isLocked      Boolean   @default(false) // Requires approval
+  title         String?
+  
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  
+  @@index([userId])
+  @@index([roomId])
+  @@index([isActive])
+}
+
+// ============================================
+// MODERATION
+// ============================================
+
+model Strike {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reason        String
+  severity      String    @default("warning")
+  issuedById    String?
+  issuedAt      DateTime  @default(now())
+  expiresAt     DateTime?
+  
+  @@index([userId])
+}
+
+// ============================================
+// CIRCLE SYSTEM (Follows)
+// ============================================
+
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String
+  follower    User     @relation("Following", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String
+  following   User     @relation("Followers", fields: [followingId], references: [id], onDelete: Cascade)
+  isBestie    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+}
+
+model Shadowblock {
+  id            String    @id @default(cuid())
+  blockerId     String
+  blocker       User      @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blockedId     String
+  blocked       User      @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+  reason        String?
+  profileSnapshot String?
+  createdAt     DateTime  @default(now())
+  
+  @@unique([blockerId, blockedId])
+}
+
+// ============================================
+// DIRECT MESSAGES
+// ============================================
+
+model DirectConversation {
+  id        String   @id @default(cuid())
+  userAId   String
+  userA     User     @relation("ConvUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userBId   String
+  userB     User     @relation("ConvUserB", fields: [userBId], references: [id], onDelete: Cascade)
+  messages  DirectMessage[]
+  lastMessageAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@unique([userAId, userBId])
+  @@index([userAId])
+  @@index([userBId])
+  @@index([lastMessageAt])
+}
+
+model DirectMessage {
+  id             String   @id @default(cuid())
+  conversationId String
+  conversation   DirectConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User     @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  content        String
+  imageUrl       String?
+  isRead         Boolean  @default(false)
+  isDeleted      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([createdAt])
+}
+
+// ============================================
+// EMAIL SYSTEM
+// ============================================
+
+model EmailLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        String   // welcome, notification, newsletter, invite
+  subject     String
+  toEmail     String
+  status      String   // queued, sent, failed, bounced, unsubscribed
+  messageId   String?  // Resend message ID
+  error       String?
+  metadata    String?  // JSON
+  createdAt   DateTime @default(now())
+  sentAt      DateTime?
+  
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+}
+
+model InviteRequest {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  note      String?
+  status    String   @default("pending") // pending, invited, ignored
+  createdAt DateTime @default(now())
+
   @@index([status])
   @@index([createdAt])
+}
+
+model AppConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model EmailPreference {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Email types
+  welcome         Boolean  @default(true)
+  notifications   Boolean  @default(true)
+  newsletters     Boolean  @default(true)
+  marketing       Boolean  @default(false)
+  system          Boolean  @default(true)
+  
+  // Global
+  enabled         Boolean  @default(true)
+  
+  updatedAt       DateTime @updatedAt
+  createdAt       DateTime @default(now())
 }

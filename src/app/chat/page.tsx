@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { io, Socket } from 'socket.io-client'
 import UserProfileCard from '@/components/user-profile-card'
 import DmPanel from '@/components/dm-panel'
-import JitsiVideo from '@/components/jitsi-video'
+import AgoraVideo from '@/components/agora-video'
 import { ROOM_TYPES, ACCESS_MODES, VIBE_PRESETS } from '@/lib/room-config'
 import { 
   MoreVertical, Edit2, Trash2, Smile, Image, X, Check, 
@@ -123,6 +123,7 @@ export default function ChatPage() {
   const [user, setUser] = useState<any>(null)
   const [isBroadcasting, setIsBroadcasting] = useState(false)
   const [broadcastRoomName, setBroadcastRoomName] = useState<string | null>(null)
+  const [broadcastToken, setBroadcastToken] = useState<string | null>(null)
   const [isLocked, setIsLocked] = useState(false)
   const [viewerCount, setViewerCount] = useState(0)
   const [viewRequests, setViewRequests] = useState<ViewRequest[]>([])
@@ -136,7 +137,7 @@ export default function ChatPage() {
     viewToken?: string
     isViewing?: boolean
   }[]>([])
-  const [viewingBroadcasts, setViewingBroadcasts] = useState<Array<{ broadcasterId: string; username: string; roomName: string }>>([])
+  const [viewingBroadcasts, setViewingBroadcasts] = useState<Array<{ broadcasterId: string; username: string; roomName: string; agoraToken?: string; uid?: string }>>([])
   
   // New feature states
   const [editing, setEditing] = useState<EditingState | null>(null)
@@ -375,12 +376,12 @@ export default function ChatPage() {
         
         if (roomName && broadcasterId !== currentUserIdRef.current && socketRef.current) {
           console.log('Auto-requesting view for broadcaster:', broadcasterId, 'roomName:', roomName, 'myId:', currentUserIdRef.current)
-          socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; roomName?: string; message?: string }) => {
+          socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; roomName?: string; agoraToken?: string; uid?: string; message?: string }) => {
             console.log('viewRequest response:', res)
             if (res.success && res.approved && res.roomName) {
               setViewingBroadcasts(prev => {
                 if (prev.find(b => b.broadcasterId === broadcasterId)) return prev
-                return [...prev, { broadcasterId, username: username || '', roomName: res.roomName! }]
+                return [...prev, { broadcasterId, username: username || '', roomName: res.roomName!, agoraToken: res.agoraToken, uid: res.uid }]
               })
             }
           })
@@ -633,11 +634,12 @@ export default function ChatPage() {
 
     console.log('Emitting startBroadcast...')
     socketRef.current.emit('startBroadcast', { source: 'camera', locked: isLocked }, 
-      (res: { success: boolean; roomName?: string; message?: string }) => {
+      (res: { success: boolean; roomName?: string; agoraToken?: string; uid?: string; message?: string }) => {
         console.log('startBroadcast callback:', res)
         if (res.success && res.roomName) {
           setIsBroadcasting(true)
           setBroadcastRoomName(res.roomName)
+          setBroadcastToken(res.agoraToken || null)
           broadcasterRoomNamesRef.current[user.id] = res.roomName
         }
       }
@@ -648,6 +650,7 @@ export default function ChatPage() {
     socketRef.current?.emit('stopBroadcast', () => {
       setIsBroadcasting(false)
       setBroadcastRoomName(null)
+      setBroadcastToken(null)
       setViewerCount(0)
       setViewRequests([])
     })
@@ -671,11 +674,11 @@ export default function ChatPage() {
     if (isLocked) {
       alert('This broadcast is locked. Request sent to broadcaster.')
     }
-    socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; roomName?: string; message?: string }) => {
+    socketRef.current.emit('viewRequest', { broadcasterId }, (res: { success: boolean; approved?: boolean; roomName?: string; agoraToken?: string; uid?: string; message?: string }) => {
       if (res.success && res.approved && res.roomName) {
         setViewingBroadcasts(prev => {
           if (prev.find(b => b.broadcasterId === broadcasterId)) return prev
-          return [...prev, { broadcasterId, username: '', roomName: res.roomName! }]
+          return [...prev, { broadcasterId, username: '', roomName: res.roomName!, agoraToken: res.agoraToken, uid: res.uid }]
         })
       }
     })
@@ -777,12 +780,13 @@ export default function ChatPage() {
       {(isBroadcasting || activeBroadcasters.length > 0) && (
         <div className="bg-gray-900 border-b border-gray-800 shrink-0">
           <div className="flex gap-3 p-3 overflow-x-auto">
-            {/* Own camera - Jitsi meeting */}
+            {/* Own camera - Agora meeting */}
             {isBroadcasting && broadcastRoomName && (
               <div className="relative shrink-0 w-44 h-32 rounded-xl overflow-hidden bg-gray-800 ring-2 ring-pink-500">
-                <JitsiVideo 
-                  roomName={broadcastRoomName}
-                  displayName={user.displayName || user.username}
+                <AgoraVideo 
+                  channelName={broadcastRoomName}
+                  uid={user.id}
+                  token={broadcastToken || 'dummy-token-for-development'}
                   isBroadcaster={true}
                 />
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1 pointer-events-none">
@@ -804,7 +808,7 @@ export default function ChatPage() {
                   onClick={() => {
                     if (!isViewing && roomName && b.broadcasterId) {
                       requestView(b.broadcasterId, roomName, b.isLocked || false)
-                      setViewingBroadcasts(prev => [...prev, { broadcasterId: b.broadcasterId, username: b.displayName || b.username || '', roomName }])
+                      setViewingBroadcasts(prev => [...prev, { broadcasterId: b.broadcasterId, username: b.displayName || b.username || '', roomName, agoraToken: undefined, uid: undefined }])
                     }
                   }}
                 >
@@ -815,13 +819,17 @@ export default function ChatPage() {
                       </div>
                     </div>
                   )}
-                  {isViewing && roomName && (
-                    <JitsiVideo 
-                      roomName={roomName}
-                      displayName={user.displayName || user.username}
-                      isBroadcaster={false}
-                    />
-                  )}
+                  {isViewing && roomName && (() => {
+                    const viewing = viewingBroadcasts.find(vb => vb.broadcasterId === b.broadcasterId)
+                    return viewing ? (
+                      <AgoraVideo 
+                        channelName={roomName}
+                        uid={viewing.uid || b.broadcasterId}
+                        token={viewing.agoraToken || 'dummy-token-for-development'}
+                        isBroadcaster={false}
+                      />
+                    ) : null
+                  })()}
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1 pointer-events-none">
                     <div className="flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
@@ -1316,9 +1324,15 @@ export default function ChatPage() {
               onViewCam={(userId, roomName) => {
                 const broadcaster = activeBroadcasters.find(b => b.broadcasterId === userId)
                 if (!viewingBroadcasts.find(b => b.broadcasterId === userId)) {
-                  setViewingBroadcasts(prev => [...prev, { broadcasterId: userId, username: broadcaster?.username || '', roomName: roomName || '' }])
+                  setViewingBroadcasts(prev => [...prev, { broadcasterId: userId, username: broadcaster?.username || '', roomName: roomName || '', agoraToken: undefined, uid: undefined }])
                 }
-                socketRef.current?.emit('viewRequest', { broadcasterId: userId })
+                socketRef.current?.emit('viewRequest', { broadcasterId: userId }, (res: { success: boolean; agoraToken?: string; uid?: string }) => {
+                  if (res.success && res.agoraToken && res.uid) {
+                    setViewingBroadcasts(prev => prev.map(b => 
+                      b.broadcasterId === userId ? { ...b, agoraToken: res.agoraToken, uid: res.uid } : b
+                    ))
+                  }
+                })
               }}
             />
           </div>

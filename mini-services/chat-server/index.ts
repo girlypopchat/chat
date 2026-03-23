@@ -4,7 +4,7 @@
 import { Server as HttpServer } from 'http'
 import { Server as SocketIOServer, Socket } from 'socket.io'
 import { db } from '../../src/lib/db'
-import { generateBroadcastRoomName, addViewRequest, getViewRequests, removeViewRequest, clearViewRequests } from '../../src/lib/jitsi'
+import { generateBroadcastRoomName, generateAgoraToken, addViewRequest, getViewRequests, removeViewRequest, clearViewRequests } from '../../src/lib/agora'
 import { canDm, getOrCreateConversation, getOtherUserId } from '../../src/lib/dm'
 
 // ============================================
@@ -34,7 +34,7 @@ const connectedUsers = new Map<string, UserSocket>()
 const roomUsers = new Map<string, Set<string>>()
 const broadcasters = new Map<string, {
   roomName: string
-  jitsiRoom: string
+  agoraChannel: string
   viewerCount: number
   isLocked: boolean
 }>()
@@ -387,6 +387,7 @@ class GirlyPopChatServer {
     }
 
     const roomName = generateBroadcastRoomName(socket.user!.username)
+    const agoraToken = generateAgoraToken(roomName, socket.userId!, true)
 
     const broadcast = await db.broadcast.create({
       data: {
@@ -399,7 +400,7 @@ class GirlyPopChatServer {
 
     broadcasters.set(socket.userId!, {
       roomName,
-      jitsiRoom: roomName,
+      agoraChannel: roomName,
       viewerCount: 0,
       isLocked: data.locked || false,
     })
@@ -417,6 +418,8 @@ class GirlyPopChatServer {
     callback({
       success: true,
       roomName,
+      agoraToken,
+      uid: socket.userId,
     })
   }
 
@@ -455,10 +458,14 @@ class GirlyPopChatServer {
 
     broadcast.viewerCount++
     
+    const agoraToken = generateAgoraToken(broadcast.agoraChannel, socket.userId!, false)
+    
     return callback({
       success: true,
       approved: true,
       roomName: broadcast.roomName,
+      agoraToken,
+      uid: socket.userId,
     })
   }
 
